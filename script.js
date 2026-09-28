@@ -2,40 +2,27 @@
  * ArcGIGuess — Game logic
  * =============================================================================
  * Pazudusī Latvija — Atrodi vietu kartē
- *
- * Basemap switching:
- *
- *   Zoom < 11
- *       ↓
- *   ArcGIS Navigation
- *
- *   Zoom 11–13
- *       ↓
- *   ArcGIS Topographic
- *
- *   Zoom >= 14
- *       ↓
- *   ArcGIS Imagery
- *
  * ========================================================================== */
 
 $arcgis
     .import([
         "@arcgis/core/config.js",
         "@arcgis/core/WebMap.js",
-        "@arcgis/core/Basemap.js",
         "@arcgis/core/Graphic.js",
         "@arcgis/core/request.js",
         "@arcgis/core/geometry/operators/distanceOperator.js",
+        "@arcgis/core/Basemap.js",
+        "@arcgis/core/layers/TileLayer.js",
     ])
     .then(
         ([
             esriConfig,
             WebMap,
-            Basemap,
             Graphic,
             esriRequest,
             distanceOperator,
+            Basemap,
+            TileLayer,
         ]) => {
             const CONFIG = window.ARCGIGUESS_CONFIG;
             const LEADERBOARD = CONFIG.leaderboard || {};
@@ -68,9 +55,7 @@ $arcgis
                 submitScore: $("submit-score-button"),
                 viewLeaderboard: $("view-leaderboard-button"),
                 closeSubmitModal: $("close-submit-modal-button"),
-                closeLeaderboardModal: $(
-                    "close-leaderboard-modal-button"
-                ),
+                closeLeaderboardModal: $("close-leaderboard-modal-button"),
             };
 
             const imageElements = {
@@ -78,10 +63,6 @@ $arcgis
                 image: $("landmark-image"),
                 spinner: $("image-spinner"),
             };
-
-            /* =========================================================================
-             * LANGUAGE
-             * ========================================================================= */
 
             const LANGUAGES = CONFIG.languages || [];
             const LANG_BY_CODE = {};
@@ -95,10 +76,6 @@ $arcgis
             let currentLanguage = DEFAULT_LANG
                 ? DEFAULT_LANG.code
                 : "lv";
-
-            /* =========================================================================
-             * GAME STATE
-             * ========================================================================= */
 
             let gameState = "LOADING";
 
@@ -119,36 +96,145 @@ $arcgis
             let finishEarlyArmed = false;
             let finishEarlyTimer = null;
 
-            /* =========================================================================
-             * BASEMAP SETTINGS
-             * =========================================================================
-             *
-             * ArcGIS Online basemap styles:
-             *
-             *   arcgis/navigation
-             *   arcgis/topographic
-             *   arcgis/imagery
-             *
-             * The basemap is changed according to the current zoom level.
-             * ========================================================================= */
-
-            const BASEMAP_ZOOM_LEVELS = {
-                navigationMax: 10,
-                topographicMax: 13,
-            };
-
-            let currentBasemapName = null;
-
-            /* =========================================================================
-             * PIN SYMBOLS
-             * ========================================================================= */
-
             const PIN_IMAGE = "./assets/pin.svg";
-
             const PIN_WIDTH = 28;
             const PIN_HEIGHT = 42;
-
             const PIN_REST_YOFFSET = PIN_HEIGHT / 2;
+
+            /* =================================================================
+             * BASEMAPS
+             * ================================================================= */
+
+            let topoBasemap;
+            let imageryBasemap;
+
+            let currentBasemapType = null;
+
+            /*
+             * Zoom levels:
+             *
+             * 0-10   -> Topographic
+             * 11+    -> Imagery
+             *
+             * Ja vēlies, vari vēlāk mainīt šo vērtību.
+             */
+            const IMAGERY_ZOOM = 11;
+
+            function createBasemaps() {
+                /*
+                 * ArcGIS Online Topographic
+                 *
+                 * Šis ir ArcGIS Online globālais topo basemap.
+                 */
+                const topoLayer = new TileLayer({
+                    url:
+                        "https://services.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer",
+                });
+
+                topoBasemap = new Basemap({
+                    baseLayers: [topoLayer],
+                    title: "ArcGIS Topographic",
+                    id: "arcgis-topographic",
+                });
+
+                /*
+                 * ArcGIS Online World Imagery
+                 *
+                 * Globāls satelīta / ortofoto basemap.
+                 *
+                 * Tas nav tikai Latvijai — tāpēc vietas ārpus Latvijas
+                 * arī turpinās strādāt.
+                 */
+                const imageryLayer = new TileLayer({
+                    url:
+                        "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer",
+                });
+
+                imageryBasemap = new Basemap({
+                    baseLayers: [imageryLayer],
+                    title: "ArcGIS World Imagery",
+                    id: "arcgis-world-imagery",
+                });
+            }
+
+            function setupBasemapSwitching() {
+                if (!mapEl || !mapEl.view) {
+                    console.warn(
+                        "Basemap switching: map view nav pieejams."
+                    );
+                    return;
+                }
+
+                /*
+                 * Sākumā izmantojam Topographic.
+                 */
+                mapEl.map.basemap = topoBasemap;
+                currentBasemapType = "topo";
+
+                /*
+                 * Klausāmies uz zoom izmaiņām.
+                 */
+                mapEl.view.watch("zoom", (zoom) => {
+                    updateBasemapForZoom(zoom);
+                });
+
+                /*
+                 * Uzreiz pārbaudām pašreizējo zoom.
+                 */
+                updateBasemapForZoom(mapEl.view.zoom);
+            }
+
+            function updateBasemapForZoom(zoom) {
+                if (!mapEl || !mapEl.map) {
+                    return;
+                }
+
+                if (typeof zoom !== "number") {
+                    return;
+                }
+
+                /*
+                 * Tālumā:
+                 *
+                 * Zoom 0-10
+                 * ArcGIS Topographic
+                 */
+                if (zoom < IMAGERY_ZOOM) {
+                    if (currentBasemapType !== "topo") {
+                        console.log(
+                            "Basemap -> ArcGIS Topographic",
+                            "zoom:",
+                            zoom
+                        );
+
+                        mapEl.map.basemap = topoBasemap;
+                        currentBasemapType = "topo";
+                    }
+
+                    return;
+                }
+
+                /*
+                 * Tuvāk:
+                 *
+                 * Zoom 11+
+                 * ArcGIS World Imagery
+                 */
+                if (currentBasemapType !== "imagery") {
+                    console.log(
+                        "Basemap -> ArcGIS World Imagery",
+                        "zoom:",
+                        zoom
+                    );
+
+                    mapEl.map.basemap = imageryBasemap;
+                    currentBasemapType = "imagery";
+                }
+            }
+
+            /* =================================================================
+             * PIN
+             * ================================================================= */
 
             function makePinSymbol(yoffset) {
                 return {
@@ -159,10 +245,6 @@ $arcgis
                     yoffset,
                 };
             }
-
-            /* =========================================================================
-             * RESULT SYMBOLS
-             * ========================================================================= */
 
             const correctPointSymbol = {
                 type: "simple-marker",
@@ -193,15 +275,12 @@ $arcgis
                 },
             };
 
-            /* =========================================================================
-             * LANGUAGE HELPERS
-             * ========================================================================= */
+            /* =================================================================
+             * LANGUAGE
+             * ================================================================= */
 
             function currentLang() {
-                return (
-                    LANG_BY_CODE[currentLanguage] ||
-                    DEFAULT_LANG
-                );
+                return LANG_BY_CODE[currentLanguage] || DEFAULT_LANG;
             }
 
             function t(key, replacements = {}) {
@@ -219,9 +298,7 @@ $arcgis
                 const values = {
                     appName: CONFIG.appName || "",
                     url:
-                        (CONFIG.social &&
-                            CONFIG.social.url) ||
-                        "",
+                        (CONFIG.social && CONFIG.social.url) || "",
                     ...replacements,
                 };
 
@@ -252,10 +329,6 @@ $arcgis
                 });
             }
 
-            /* =========================================================================
-             * UI
-             * ========================================================================= */
-
             function showPanel(panelName) {
                 for (const panel of Object.values(panels)) {
                     if (panel) {
@@ -264,9 +337,7 @@ $arcgis
                 }
 
                 if (panels[panelName]) {
-                    panels[panelName].classList.remove(
-                        "hidden"
-                    );
+                    panels[panelName].classList.remove("hidden");
                 }
             }
 
@@ -277,8 +348,7 @@ $arcgis
                     currentLanguage;
 
                 document.body.dir =
-                    (activeLang && activeLang.dir) ||
-                    "ltr";
+                    (activeLang && activeLang.dir) || "ltr";
 
                 if (buttons.langToggle) {
                     buttons.langToggle.innerText =
@@ -298,11 +368,13 @@ $arcgis
                 }
 
                 if ($("welcome-desc")) {
-                    $("welcome-desc").innerHTML =
-                        t("welcomeDesc", {
+                    $("welcome-desc").innerHTML = t(
+                        "welcomeDesc",
+                        {
                             scoringSummary:
                                 buildScoringSummary(),
-                        });
+                        }
+                    );
                 }
 
                 if (buttons.start) {
@@ -335,7 +407,8 @@ $arcgis
                         t("roundDisplay", {
                             current:
                                 currentLandmarkIndex + 1,
-                            total: allLandmarks.length,
+                            total:
+                                allLandmarks.length,
                         });
                 }
 
@@ -433,12 +506,16 @@ $arcgis
 
                 if ($("leaderboard-modal-title")) {
                     $("leaderboard-modal-title").innerText =
-                        t("leaderboardModalTitle");
+                        t(
+                            "leaderboardModalTitle"
+                        );
                 }
 
                 if ($("leaderboard-loading-text")) {
                     $("leaderboard-loading-text").innerText =
-                        t("leaderboardLoadingText");
+                        t(
+                            "leaderboardLoadingText"
+                        );
                 }
 
                 if ($("share-card-title")) {
@@ -448,12 +525,16 @@ $arcgis
 
                 if ($("share-card-score-label")) {
                     $("share-card-score-label").innerText =
-                        t("shareCardScoreLabel");
+                        t(
+                            "shareCardScoreLabel"
+                        );
                 }
 
                 if ($("share-card-accuracy-label")) {
                     $("share-card-accuracy-label").innerText =
-                        t("shareCardAccuracyLabel");
+                        t(
+                            "shareCardAccuracyLabel"
+                        );
                 }
 
                 if ($("share-card-found-label")) {
@@ -492,14 +573,8 @@ $arcgis
                 }
             }
 
-            /* =========================================================================
-             * LANGUAGE TOGGLE
-             * ========================================================================= */
-
             function toggleLanguage() {
-                if (LANGUAGES.length < 2) {
-                    return;
-                }
+                if (LANGUAGES.length < 2) return;
 
                 const idx = LANGUAGES.findIndex(
                     (lang) =>
@@ -515,7 +590,9 @@ $arcgis
 
                 if (
                     gameState === "PLAYING" &&
-                    allLandmarks[currentLandmarkIndex]
+                    allLandmarks[
+                        currentLandmarkIndex
+                    ]
                 ) {
                     const landmark =
                         allLandmarks[
@@ -524,14 +601,12 @@ $arcgis
 
                     if ($("landmark-name")) {
                         $("landmark-name").innerText =
-                            getLandmarkName(landmark);
+                            getLandmarkName(
+                                landmark
+                            );
                     }
                 }
             }
-
-            /* =========================================================================
-             * ARRAY HELPERS
-             * ========================================================================= */
 
             function shuffleArray(array) {
                 for (
@@ -539,11 +614,16 @@ $arcgis
                     i > 0;
                     i--
                 ) {
-                    const j = Math.floor(
-                        Math.random() * (i + 1)
-                    );
+                    const j =
+                        Math.floor(
+                            Math.random() *
+                                (i + 1)
+                        );
 
-                    [array[i], array[j]] = [
+                    [
+                        array[i],
+                        array[j],
+                    ] = [
                         array[j],
                         array[i],
                     ];
@@ -552,31 +632,32 @@ $arcgis
                 return array;
             }
 
-            /* =========================================================================
-             * SHARE HELPERS
-             * ========================================================================= */
-
-            function dataURLtoFile(dataUrl, filename) {
+            function dataURLtoFile(
+                dataUrl,
+                filename
+            ) {
                 return fetch(dataUrl)
-                    .then((res) => res.blob())
+                    .then((res) =>
+                        res.blob()
+                    )
                     .then(
                         (blob) =>
                             new File(
                                 [blob],
                                 filename,
                                 {
-                                    type: blob.type,
+                                    type:
+                                        blob.type,
                                 }
                             )
                     );
             }
 
-            /* =========================================================================
-             * LANDMARK HELPERS
-             * ========================================================================= */
-
             function getLandmarkName(feature) {
-                if (!feature || !feature.attributes) {
+                if (
+                    !feature ||
+                    !feature.attributes
+                ) {
                     return "Nezināma vieta";
                 }
 
@@ -588,19 +669,27 @@ $arcgis
                     "Name";
 
                 return (
-                    feature.attributes[field] ||
-                    "Nezināma vieta"
+                    feature.attributes[
+                        field
+                    ] || "Nezināma vieta"
                 );
             }
 
             function getLandmarkPhoto(feature) {
-                if (!feature || !feature.attributes) {
+                if (
+                    !feature ||
+                    !feature.attributes
+                ) {
                     return null;
                 }
 
-                if (feature.attributes.imageUrl) {
+                if (
+                    feature.attributes
+                        .imageUrl
+                ) {
                     return String(
-                        feature.attributes.imageUrl
+                        feature.attributes
+                            .imageUrl
                     ).trim();
                 }
 
@@ -611,9 +700,7 @@ $arcgis
                 const value =
                     feature.attributes[field];
 
-                if (!value) {
-                    return null;
-                }
+                if (!value) return null;
 
                 return String(value).trim();
             }
@@ -624,10 +711,6 @@ $arcgis
                     : null;
             }
 
-            /* =========================================================================
-             * DISTANCE
-             * ========================================================================= */
-
             function getDistanceMeters(
                 targetGeometry,
                 guessPoint
@@ -635,9 +718,8 @@ $arcgis
                 if (
                     !targetGeometry ||
                     !guessPoint
-                ) {
+                )
                     return 0;
-                }
 
                 try {
                     const distance =
@@ -652,7 +734,9 @@ $arcgis
                     if (
                         typeof distance ===
                             "number" &&
-                        !Number.isNaN(distance)
+                        !Number.isNaN(
+                            distance
+                        )
                     ) {
                         return Math.max(
                             0,
@@ -676,9 +760,8 @@ $arcgis
                 if (
                     !targetGeometry ||
                     !guessPoint
-                ) {
+                )
                     return false;
-                }
 
                 const scoring =
                     CONFIG.scoring || {
@@ -697,10 +780,6 @@ $arcgis
                 );
             }
 
-            /* =========================================================================
-             * RESULT SYMBOL
-             * ========================================================================= */
-
             function getResultSymbol(
                 geometry,
                 gotFullPoints
@@ -712,7 +791,8 @@ $arcgis
                 if (
                     geometry.type ===
                         "polygon" ||
-                    geometry.type === "extent"
+                    geometry.type ===
+                        "extent"
                 ) {
                     return gotFullPoints
                         ? correctAreaSymbol
@@ -722,160 +802,9 @@ $arcgis
                 return correctPointSymbol;
             }
 
-            /* =========================================================================
-             * BASEMAP SWITCHER
-             * =========================================================================
-             *
-             * This is the important new part.
-             *
-             * Zoom < 11:
-             *     ArcGIS Navigation
-             *
-             * Zoom 11–13:
-             *     ArcGIS Topographic
-             *
-             * Zoom >= 14:
-             *     ArcGIS Imagery
-             *
-             * The ArcGIS Maps SDK supports basemap style IDs such as
-             * arcgis/navigation and arcgis/imagery. 
-             * ========================================================================= */
-
-            function getBasemapForZoom(zoom) {
-                if (
-                    zoom <=
-                    BASEMAP_ZOOM_LEVELS.navigationMax
-                ) {
-                    return "arcgis/navigation";
-                }
-
-                if (
-                    zoom <=
-                    BASEMAP_ZOOM_LEVELS.topographicMax
-                ) {
-                    return "arcgis/topographic";
-                }
-
-                return "arcgis/imagery";
-            }
-
-            function setupBasemapSwitcher() {
-                if (!mapEl) {
-                    console.warn(
-                        "Basemap switcher: map element not found."
-                    );
-
-                    return;
-                }
-
-                if (!webmap) {
-                    console.warn(
-                        "Basemap switcher: WebMap not found."
-                    );
-
-                    return;
-                }
-
-                const view = mapEl.view;
-
-                if (!view) {
-                    console.warn(
-                        "Basemap switcher: view not found."
-                    );
-
-                    return;
-                }
-
-                console.log(
-                    "Basemap switcher initialized."
-                );
-
-                console.log(
-                    "Current zoom:",
-                    view.zoom
-                );
-
-                /*
-                 * Set the initial basemap immediately.
-                 */
-                applyBasemapForZoom(view.zoom);
-
-                /*
-                 * Watch zoom changes.
-                 */
-                view.watch(
-                    "zoom",
-                    (zoom) => {
-                        if (
-                            typeof zoom !==
-                            "number"
-                        ) {
-                            return;
-                        }
-
-                        applyBasemapForZoom(
-                            zoom
-                        );
-                    }
-                );
-            }
-
-            function applyBasemapForZoom(zoom) {
-                if (!webmap) {
-                    return;
-                }
-
-                const newBasemap =
-                    getBasemapForZoom(zoom);
-
-                /*
-                 * Don't reload the same basemap
-                 * continuously.
-                 */
-                if (
-                    currentBasemapName ===
-                    newBasemap
-                ) {
-                    return;
-                }
-
-                console.log(
-                    `Basemap change: zoom ${zoom.toFixed(
-                        2
-                    )} → ${newBasemap}`
-                );
-
-                try {
-                    /*
-                     * Directly assign the ArcGIS basemap
-                     * style to the WebMap.
-                     *
-                     * Example:
-                     *
-                     * webmap.basemap =
-                     *     "arcgis/imagery";
-                     */
-                    webmap.basemap =
-                        newBasemap;
-
-                    currentBasemapName =
-                        newBasemap;
-
-                    console.log(
-                        "Basemap successfully changed to:",
-                        newBasemap
-                    );
-                } catch (error) {
-                    console.error(
-                        "Failed to change basemap:",
-                        error
-                    );
-                }
-            }
-
-            /* =========================================================================
-             * INITIALIZATION
-             * ========================================================================= */
+            /* =================================================================
+             * INIT
+             * ================================================================= */
 
             async function init() {
                 try {
@@ -893,55 +822,45 @@ $arcgis
                     }
 
                     /*
-                     * Load the WebMap.
+                     * Izveidojam basemap objektus PIRMS WebMap.
                      */
+                    createBasemaps();
+
                     webmap = new WebMap({
                         portalItem: {
-                            id: CONFIG.webMapItemId,
+                            id:
+                                CONFIG.webMapItemId,
                         },
                     });
 
-                    /*
-                     * Attach WebMap to the map component.
-                     */
                     mapEl.map = webmap;
 
-                    /*
-                     * Wait until WebMap is loaded.
-                     */
                     await webmap.load();
 
                     console.log(
-                        "WebMap loaded:",
-                        webmap
-                    );
-
-                    console.log(
-                        "Original WebMap basemap:",
-                        webmap.basemap
-                    );
-
-                    console.log(
                         "WebMap layers:",
-                        webmap.layers.map(
-                            (layer) =>
-                                layer.title
-                        ).toArray
+                        webmap.layers
+                            .map(
+                                (layer) =>
+                                    layer.title
+                            )
+                            .toArray
                             ? webmap.layers
                                   .map(
-                                      (layer) =>
+                                      (
+                                          layer
+                                      ) =>
                                           layer.title
                                   )
                                   .toArray()
                             : webmap.layers.map(
-                                  (layer) =>
+                                  (
+                                      layer
+                                  ) =>
                                       layer.title
                               )
                     );
 
-                    /*
-                     * Find landmark layer.
-                     */
                     landmarksLayer =
                         webmap.layers.find(
                             (layer) =>
@@ -955,43 +874,31 @@ $arcgis
                         );
 
                         alert(
-                            "Tīmekļa kartē neizdevās atrast slāni “Vietas”. Pārbaudi, vai layer name tiešām ir Vietas."
+                            "Tīmekļa kartē neizdevās atrast slāni “Vietas”."
                         );
 
                         return;
                     }
 
                     /*
-                     * We don't want the actual landmark
-                     * layer visible during gameplay.
+                     * Vietu slāni paslēpjam.
+                     *
+                     * Tas novērš iespēju, ka spēles atbildes
+                     * tiek redzētas pirms minējuma.
                      */
                     landmarksLayer.visible =
                         false;
 
-                    /*
-                     * Wait until MapView is ready.
-                     */
                     await mapEl.viewOnReady();
 
-                    console.log(
-                        "MapView ready."
-                    );
-
-                    console.log(
-                        "Initial zoom:",
-                        mapEl.view.zoom
-                    );
-
                     /*
-                     * IMPORTANT:
-                     * Start basemap switching AFTER
-                     * the WebMap and View are ready.
+                     * SVARĪGI:
+                     *
+                     * Šeit sākas automātiskā basemap
+                     * pārslēgšana pēc zoom.
                      */
-                    setupBasemapSwitcher();
+                    setupBasemapSwitching();
 
-                    /*
-                     * Load landmarks.
-                     */
                     await loadGameData();
 
                     gameState = "START";
@@ -1004,7 +911,7 @@ $arcgis
                     );
 
                     alert(
-                        "Neizdevās ielādēt spēles datus. Pārbaudi Web Map ID, slāni “Vietas”, publisko piekļuvi un laukus FID/Name/Photo."
+                        "Neizdevās ielādēt spēles datus. Pārbaudi Web Map ID, slāni “Vietas”, publisko piekļuvi un laukus."
                     );
 
                     gameState = "LOADING";
@@ -1013,9 +920,9 @@ $arcgis
                 }
             }
 
-            /* =========================================================================
-             * LOAD GAME DATA
-             * ========================================================================= */
+            /* =================================================================
+             * DATA
+             * ================================================================= */
 
             function loadGameData() {
                 try {
@@ -1023,16 +930,16 @@ $arcgis
                         landmarksLayer.createQuery();
 
                     query.where = "1=1";
-
                     query.outFields = ["*"];
-
                     query.returnGeometry =
                         true;
 
                     return landmarksLayer
                         .queryFeatures(query)
                         .then(
-                            (featureSet) => {
+                            (
+                                featureSet
+                            ) => {
                                 console.log(
                                     "FeatureSet:",
                                     featureSet
@@ -1040,12 +947,16 @@ $arcgis
 
                                 const landmarks =
                                     featureSet.features.filter(
-                                        (feature) =>
+                                        (
+                                            feature
+                                        ) =>
                                             feature.geometry
                                     );
 
                                 landmarks.forEach(
-                                    (feature) => {
+                                    (
+                                        feature
+                                    ) => {
                                         const photoUrl =
                                             feature
                                                 .attributes
@@ -1085,7 +996,7 @@ $arcgis
                                     !landmarkPool.length
                                 ) {
                                     alert(
-                                        "Netika atrasta neviena vieta. Pārbaudi, vai slānī “Vietas” ir punkti/poligoni ar ģeometriju."
+                                        "Netika atrasta neviena vieta."
                                     );
                                 }
 
@@ -1099,7 +1010,7 @@ $arcgis
                             );
 
                             alert(
-                                "Neizdevās ielādēt vietu datus. Pārbaudi, vai slānis “Vietas” ir publisks un vai tam ir ieslēgta Query/Extract piekļuve."
+                                "Neizdevās ielādēt vietu datus."
                             );
 
                             return Promise.reject(
@@ -1122,9 +1033,9 @@ $arcgis
                 }
             }
 
-            /* =========================================================================
-             * START GAME
-             * ========================================================================= */
+            /* =================================================================
+             * GAME
+             * ================================================================= */
 
             function startGame() {
                 currentLandmarkIndex = 0;
@@ -1162,10 +1073,6 @@ $arcgis
                 startRound();
             }
 
-            /* =========================================================================
-             * START ROUND
-             * ========================================================================= */
-
             function startRound() {
                 clickedPoint = null;
 
@@ -1181,10 +1088,14 @@ $arcgis
                     ];
 
                 const name =
-                    getLandmarkName(landmark);
+                    getLandmarkName(
+                        landmark
+                    );
 
                 const imageUrl =
-                    getLandmarkPhoto(landmark);
+                    getLandmarkPhoto(
+                        landmark
+                    );
 
                 if ($("landmark-name")) {
                     $("landmark-name").innerText =
@@ -1204,7 +1115,9 @@ $arcgis
                         "hidden"
                     );
 
-                    if (imageElements.spinner) {
+                    if (
+                        imageElements.spinner
+                    ) {
                         imageElements.spinner.classList.remove(
                             "hidden"
                         );
@@ -1272,20 +1185,16 @@ $arcgis
                 }
 
                 gameState = "PLAYING";
-
                 clicksEnabled = true;
 
                 updateUI();
             }
 
-            /* =========================================================================
-             * MAP CLICK
-             * ========================================================================= */
-
-            function handleMapClick(mapPoint) {
-                if (!clicksEnabled) {
+            function handleMapClick(
+                mapPoint
+            ) {
+                if (!clicksEnabled)
                     return;
-                }
 
                 clickedPoint = mapPoint;
 
@@ -1295,7 +1204,8 @@ $arcgis
 
                 const pinGraphic =
                     new Graphic({
-                        geometry: clickedPoint,
+                        geometry:
+                            clickedPoint,
                         symbol: makePinSymbol(
                             PIN_REST_YOFFSET
                         ),
@@ -1312,14 +1222,11 @@ $arcgis
                 updateUI();
             }
 
-            /* =========================================================================
-             * PIN ANIMATION
-             * ========================================================================= */
-
-            function animatePinDrop(graphic) {
+            function animatePinDrop(
+                graphic
+            ) {
                 const dropHeight = 60;
                 const duration = 650;
-
                 const start =
                     performance.now();
 
@@ -1367,7 +1274,8 @@ $arcgis
                     return (
                         n1 *
                             (x -=
-                                1.5 / d1) *
+                                1.5 /
+                                d1) *
                             x +
                         0.75
                     );
@@ -1377,7 +1285,8 @@ $arcgis
                     return (
                         n1 *
                             (x -=
-                                2.25 / d1) *
+                                2.25 /
+                                d1) *
                             x +
                         0.9375
                     );
@@ -1386,20 +1295,16 @@ $arcgis
                 return (
                     n1 *
                         (x -=
-                            2.625 / d1) *
+                            2.625 /
+                            d1) *
                         x +
                     0.984375
                 );
             }
 
-            /* =========================================================================
-             * CONFIRM GUESS
-             * ========================================================================= */
-
             function confirmGuess() {
-                if (!clickedPoint) {
+                if (!clickedPoint)
                     return;
-                }
 
                 clicksEnabled = false;
 
@@ -1427,10 +1332,11 @@ $arcgis
                         clickedPoint
                     );
 
-                const hit = isDirectHit(
-                    targetGeometry,
-                    clickedPoint
-                );
+                const hit =
+                    isDirectHit(
+                        targetGeometry,
+                        clickedPoint
+                    );
 
                 let roundScore;
 
@@ -1438,20 +1344,22 @@ $arcgis
                     roundScore =
                         scoring.pointsForHit;
                 } else {
-                    const bands = Math.floor(
-                        distanceInMeters /
-                            scoring.bucketMeters
-                    );
+                    const bands =
+                        Math.floor(
+                            distanceInMeters /
+                                scoring.bucketMeters
+                        );
 
                     const penalty =
                         bands *
                         scoring.penaltyPerBucket;
 
-                    roundScore = Math.max(
-                        scoring.minScore,
-                        scoring.pointsForHit -
-                            penalty
-                    );
+                    roundScore =
+                        Math.max(
+                            scoring.minScore,
+                            scoring.pointsForHit -
+                                penalty
+                        );
                 }
 
                 const gotFullPoints =
@@ -1466,14 +1374,21 @@ $arcgis
                         t("correctTitle");
 
                     resultMessage =
-                        t("correctMessage", {
-                            roundScore,
-                        });
+                        t(
+                            "correctMessage",
+                            {
+                                roundScore,
+                            }
+                        );
 
-                    accuracyTracker.push(1);
+                    accuracyTracker.push(
+                        1
+                    );
                 } else {
                     resultTitle =
-                        t("incorrectTitle");
+                        t(
+                            "incorrectTitle"
+                        );
 
                     resultMessage =
                         t(
@@ -1487,12 +1402,16 @@ $arcgis
                             }
                         );
 
-                    accuracyTracker.push(0);
+                    accuracyTracker.push(
+                        0
+                    );
                 }
 
                 totalScore += roundScore;
 
-                if ($("round-result-title")) {
+                if (
+                    $("round-result-title")
+                ) {
                     $("round-result-title").innerText =
                         resultTitle;
 
@@ -1502,7 +1421,9 @@ $arcgis
                             : "#dc2626";
                 }
 
-                if ($("round-result-message")) {
+                if (
+                    $("round-result-message")
+                ) {
                     $("round-result-message").innerHTML =
                         resultMessage;
                 }
@@ -1532,14 +1453,10 @@ $arcgis
                 updateUI();
             }
 
-            /* =========================================================================
-             * GO TO ANSWER
-             * ========================================================================= */
-
-            function goToAnswer(geometry) {
-                if (!geometry) {
-                    return;
-                }
+            function goToAnswer(
+                geometry
+            ) {
+                if (!geometry) return;
 
                 let target = geometry;
 
@@ -1565,12 +1482,9 @@ $arcgis
                     });
             }
 
-            /* =========================================================================
-             * FINISH EARLY
-             * ========================================================================= */
-
             function resetFinishEarly() {
-                finishEarlyArmed = false;
+                finishEarlyArmed =
+                    false;
 
                 if (finishEarlyTimer) {
                     clearTimeout(
@@ -1580,7 +1494,9 @@ $arcgis
                     finishEarlyTimer = null;
                 }
 
-                if (buttons.finishEarly) {
+                if (
+                    buttons.finishEarly
+                ) {
                     buttons.finishEarly.classList.remove(
                         "armed"
                     );
@@ -1594,7 +1510,8 @@ $arcgis
 
             function handleFinishEarly() {
                 if (!finishEarlyArmed) {
-                    finishEarlyArmed = true;
+                    finishEarlyArmed =
+                        true;
 
                     buttons.finishEarly.classList.add(
                         "armed"
@@ -1621,10 +1538,6 @@ $arcgis
                 endGame();
             }
 
-            /* =========================================================================
-             * NEXT ROUND
-             * ========================================================================= */
-
             function nextRound() {
                 currentLandmarkIndex++;
 
@@ -1638,10 +1551,6 @@ $arcgis
                 }
             }
 
-            /* =========================================================================
-             * END GAME
-             * ========================================================================= */
-
             function endGame() {
                 gameState =
                     "GAME_OVER";
@@ -1651,7 +1560,8 @@ $arcgis
                 updateUI();
 
                 const total =
-                    allLandmarks.length || 1;
+                    allLandmarks.length ||
+                    1;
 
                 const foundCount =
                     accuracyTracker.filter(
@@ -1659,10 +1569,12 @@ $arcgis
                             value === 1
                     ).length;
 
-                const accuracy = Math.round(
-                    (foundCount / total) *
-                        100
-                );
+                const accuracy =
+                    Math.round(
+                        (foundCount /
+                            total) *
+                            100
+                    );
 
                 const foundText = `${foundCount} / ${allLandmarks.length}`;
 
@@ -1681,7 +1593,9 @@ $arcgis
                         foundText;
                 }
 
-                if ($("share-card-score")) {
+                if (
+                    $("share-card-score")
+                ) {
                     $("share-card-score").innerText =
                         totalScore;
                 }
@@ -1693,15 +1607,17 @@ $arcgis
                         `${accuracy}%`;
                 }
 
-                if ($("share-card-found")) {
+                if (
+                    $("share-card-found")
+                ) {
                     $("share-card-found").innerText =
                         foundText;
                 }
             }
 
-            /* =========================================================================
-             * SHARE RESULTS
-             * ========================================================================= */
+            /* =================================================================
+             * SHARE
+             * ================================================================= */
 
             function shareResults() {
                 const shareCard =
@@ -1715,9 +1631,10 @@ $arcgis
                     return;
                 }
 
-                const fileName = `${CONFIG.appName
-                    .replace(/\s+/g, "-")
-                    .toLowerCase()}-results.png`;
+                const fileName =
+                    `${CONFIG.appName
+                        .replace(/\s+/g, "-")
+                        .toLowerCase()}-results.png`;
 
                 shareCard.classList.remove(
                     "hidden"
@@ -1730,10 +1647,13 @@ $arcgis
                     "-9999px";
 
                 setTimeout(() => {
-                    html2canvas(shareCard, {
-                        scale: 2,
-                        useCORS: true,
-                    })
+                    html2canvas(
+                        shareCard,
+                        {
+                            scale: 2,
+                            useCORS: true,
+                        }
+                    )
                         .then((canvas) => {
                             const dataUrl =
                                 canvas.toDataURL(
@@ -1776,7 +1696,8 @@ $arcgis
                                             text: t(
                                                 "shareText",
                                                 {
-                                                    score: totalScore,
+                                                    score:
+                                                        totalScore,
                                                 }
                                             ),
                                             files: [
@@ -1821,9 +1742,7 @@ $arcgis
                 const shareCard =
                     $("share-card");
 
-                if (!shareCard) {
-                    return;
-                }
+                if (!shareCard) return;
 
                 shareCard.classList.add(
                     "hidden"
@@ -1835,14 +1754,13 @@ $arcgis
                 shareCard.style.left = "";
             }
 
-            /* =========================================================================
-             * SUBMIT SCORE
-             * ========================================================================= */
+            /* =================================================================
+             * LEADERBOARD
+             * ================================================================= */
 
             function showSubmitModal() {
-                if (!LEADERBOARD.enabled) {
+                if (!LEADERBOARD.enabled)
                     return;
-                }
 
                 const fieldId =
                     LEADERBOARD.submitScoreFieldId;
@@ -1862,21 +1780,18 @@ $arcgis
                         url;
                 }
 
-                if (panels.submitModal) {
+                if (
+                    panels.submitModal
+                ) {
                     panels.submitModal.classList.remove(
                         "hidden"
                     );
                 }
             }
 
-            /* =========================================================================
-             * LEADERBOARD
-             * ========================================================================= */
-
             function showLeaderboard() {
-                if (!LEADERBOARD.enabled) {
+                if (!LEADERBOARD.enabled)
                     return;
-                }
 
                 panels.leaderboardModal.classList.remove(
                     "hidden"
@@ -1910,7 +1825,8 @@ $arcgis
                     LEADERBOARD.dataApiUrl,
                     {
                         query: queryParams,
-                        responseType: "json",
+                        responseType:
+                            "json",
                     }
                 )
                     .then((response) => {
@@ -1936,9 +1852,10 @@ $arcgis
                             "hidden"
                         );
 
-                        panels.leaderboardList.innerHTML = `<li class="text-red-600">${t(
-                            "leaderboardError"
-                        )}</li>`;
+                        panels.leaderboardList.innerHTML =
+                            `<li class="text-red-600">${t(
+                                "leaderboardError"
+                            )}</li>`;
                     });
             }
 
@@ -1957,15 +1874,19 @@ $arcgis
                     !features ||
                     features.length === 0
                 ) {
-                    panels.leaderboardList.innerHTML = `<li>${t(
-                        "noScores"
-                    )}</li>`;
+                    panels.leaderboardList.innerHTML =
+                        `<li>${t(
+                            "noScores"
+                        )}</li>`;
 
                     return;
                 }
 
                 features.forEach(
-                    (feature, index) => {
+                    (
+                        feature,
+                        index
+                    ) => {
                         const firstName =
                             feature
                                 .attributes[
@@ -1981,7 +1902,8 @@ $arcgis
                             ] || "";
 
                         const name =
-                            `${firstName} ${lastName}`.trim() ||
+                            `${firstName} ${lastName}`
+                                .trim() ||
                             "Anonymous";
 
                         const score =
@@ -2007,7 +1929,8 @@ $arcgis
                         nameSpan.className =
                             "font-bold text-lg text-blue-700";
 
-                        nameSpan.textContent = `${index + 1}. ${name}`;
+                        nameSpan.textContent =
+                            `${index + 1}. ${name}`;
 
                         const scoreSpan =
                             document.createElement(
@@ -2017,9 +1940,10 @@ $arcgis
                         scoreSpan.className =
                             "font-semibold text-lg";
 
-                        scoreSpan.textContent = `${score} ${t(
-                            "points"
-                        )}`;
+                        scoreSpan.textContent =
+                            `${score} ${t(
+                                "points"
+                            )}`;
 
                         li.appendChild(
                             nameSpan
@@ -2036,25 +1960,30 @@ $arcgis
                 );
             }
 
-            /* =========================================================================
+            /* =================================================================
              * STATIC CONFIG
-             * ========================================================================= */
+             * ================================================================= */
 
             function applyStaticConfig() {
-                document.title = `${CONFIG.appName} | ${CONFIG.tagline}`;
+                document.title =
+                    `${CONFIG.appName} | ${CONFIG.tagline}`;
 
-                const logoAlt = `${CONFIG.appName} Logo`;
+                const logoAlt =
+                    `${CONFIG.appName} Logo`;
 
                 [
                     $("start-logo"),
                     $("share-logo"),
                 ].forEach((img) => {
                     if (img) {
-                        img.alt = logoAlt;
+                        img.alt =
+                            logoAlt;
                     }
                 });
 
-                if ($("share-card-footer")) {
+                if (
+                    $("share-card-footer")
+                ) {
                     $("share-card-footer").innerText =
                         CONFIG.shareCardFooter ||
                         CONFIG.tagline;
@@ -2084,16 +2013,11 @@ $arcgis
                 }
             }
 
-            /* =========================================================================
-             * SOCIAL META
-             * ========================================================================= */
-
             function applySocialMeta() {
-                const s = CONFIG.social;
+                const s =
+                    CONFIG.social;
 
-                if (!s) {
-                    return;
-                }
+                if (!s) return;
 
                 const setMeta = (
                     selector,
@@ -2102,9 +2026,8 @@ $arcgis
                     if (
                         value == null ||
                         value === ""
-                    ) {
+                    )
                         return;
-                    }
 
                     const el =
                         document.head.querySelector(
@@ -2175,24 +2098,29 @@ $arcgis
                 );
             }
 
-            /* =========================================================================
+            /* =================================================================
              * EVENTS
-             * ========================================================================= */
+             * ================================================================= */
 
             if (mapEl) {
                 mapEl.addEventListener(
                     "arcgisViewClick",
                     (event) => {
-                        if (clicksEnabled) {
+                        if (
+                            clicksEnabled
+                        ) {
                             handleMapClick(
-                                event.detail.mapPoint
+                                event.detail
+                                    .mapPoint
                             );
                         }
                     }
                 );
             }
 
-            if (buttons.langToggle) {
+            if (
+                buttons.langToggle
+            ) {
                 buttons.langToggle.addEventListener(
                     "click",
                     toggleLanguage
@@ -2220,14 +2148,18 @@ $arcgis
                 );
             }
 
-            if (buttons.finishEarly) {
+            if (
+                buttons.finishEarly
+            ) {
                 buttons.finishEarly.addEventListener(
                     "click",
                     handleFinishEarly
                 );
             }
 
-            if (buttons.playAgain) {
+            if (
+                buttons.playAgain
+            ) {
                 buttons.playAgain.addEventListener(
                     "click",
                     startGame
@@ -2256,14 +2188,18 @@ $arcgis
                 );
             }
 
-            if (buttons.submitScore) {
+            if (
+                buttons.submitScore
+            ) {
                 buttons.submitScore.addEventListener(
                     "click",
                     showSubmitModal
                 );
             }
 
-            if (buttons.viewLeaderboard) {
+            if (
+                buttons.viewLeaderboard
+            ) {
                 buttons.viewLeaderboard.addEventListener(
                     "click",
                     showLeaderboard
@@ -2312,9 +2248,9 @@ $arcgis
                 );
             }
 
-            /* =========================================================================
+            /* =================================================================
              * START
-             * ========================================================================= */
+             * ================================================================= */
 
             applyStaticConfig();
 
@@ -2322,77 +2258,39 @@ $arcgis
 
             updateUI();
 
-            /* =========================================================================
-             * DEBUG / TEST
-             * ========================================================================= */
-
-            window.skipToResults = () => {
-                console.log(
-                    "Skipping to results with a random score."
-                );
-
-                if (
-                    allLandmarks.length ===
-                    0
-                ) {
-                    allLandmarks =
-                        new Array(5).fill(1);
-                }
-
-                totalScore =
-                    Math.floor(
-                        Math.random() *
-                            (allLandmarks.length *
-                                8)
-                    ) + 10;
-
-                accuracyTracker =
-                    allLandmarks.map(
-                        () =>
-                            Math.random() >
-                            0.5
-                                ? 1
-                                : 0
+            window.skipToResults =
+                () => {
+                    console.log(
+                        "Skipping to results with a random score."
                     );
 
-                endGame();
-            };
+                    if (
+                        allLandmarks.length ===
+                        0
+                    ) {
+                        allLandmarks =
+                            new Array(
+                                5
+                            ).fill(1);
+                    }
 
-            /*
-             * Optional debug helper.
-             *
-             * Open browser console and type:
-             *
-             *     setArcGISBasemap("arcgis/imagery")
-             *
-             * or:
-             *
-             *     setArcGISBasemap("arcgis/navigation")
-             *
-             * This is useful to verify that basemap
-             * switching itself works.
-             */
-            window.setArcGISBasemap = (
-                basemapId
-            ) => {
-                if (!webmap) {
-                    console.warn(
-                        "WebMap is not ready yet."
-                    );
+                    totalScore =
+                        Math.floor(
+                            Math.random() *
+                                (allLandmarks.length *
+                                    8)
+                        ) + 10;
 
-                    return;
-                }
+                    accuracyTracker =
+                        allLandmarks.map(
+                            () =>
+                                Math.random() >
+                                0.5
+                                    ? 1
+                                    : 0
+                        );
 
-                console.log(
-                    "Manual basemap change:",
-                    basemapId
-                );
-
-                webmap.basemap =
-                    basemapId;
-
-                currentBasemapName =
-                    basemapId;
-            };
+                    endGame();
+                };
         }
     );
