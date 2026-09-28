@@ -9,7 +9,7 @@ window.ARCGIGUESS_CONFIG = {
      * 1. BRANDING
      * ---------------------------------------------------------------------- */
 
-    appName: "Pazudusī Latvija: Atrodi vietu kartē",
+    appName: "Vietas, kuras nedrīkstam aizmirst!",
 
     tagline: "Pārbaudi savas zināšanas",
 
@@ -80,7 +80,7 @@ window.ARCGIGUESS_CONFIG = {
                 /* START SCREEN */
 
                 welcomeTitle:
-                    "Laipni lūdzam “Pazudusī Latvija”!",
+                    "Laipni lūdzam “Vietas, kuras nedrīkstam aizmirst”!",
 
                 welcomeDesc:
                     "Atrodi vietu. Atceries vēsturi. Pārbaudi sevi! Mēs parādīsim vēsturiskas vietas nosaukumu un attēlu. Vai vari to atrast kartē?<br><br>{scoringSummary}",
@@ -222,7 +222,7 @@ window.ARCGIGUESS_CONFIG = {
 
     social: {
         title:
-            "Pazudusī Latvija: Atrodi vietu kartē",
+            "Vietas, kuras nedrīkstam aizmirst!: Atrodi vietu kartē",
 
         description:
             "Atrodi vietu. Atceries vēsturi. Pārbaudi sevi! Mēs parādīsim vēsturiskas vietas nosaukumu un attēlu.",
