@@ -82,6 +82,136 @@ $arcgis
         let finishEarlyArmed = false;
         let finishEarlyTimer = null;
 
+        /*
+         * =========================================================================
+         * BASEMAP SETTINGS
+         * =========================================================================
+         *
+         * Zoomed out:
+         *     OpenStreetMap
+         *
+         * Zoomed in:
+         *     ArcGIS World Imagery
+         *
+         * Hysteresis:
+         *     OSM -> Imagery    at 1:45,000
+         *     Imagery -> OSM    at 1:60,000
+         *
+         * This prevents the basemap from rapidly switching when the user
+         * zooms around the boundary.
+         * =========================================================================
+         */
+
+        const BASEMAP = {
+            OSM: "osm",
+            IMAGERY: "satellite",
+
+            // Switch from OSM to imagery when zooming IN.
+            IMAGERY_ON_SCALE: 45000,
+
+            // Switch from imagery back to OSM when zooming OUT.
+            OSM_ON_SCALE: 60000,
+        };
+
+        let currentBasemap = BASEMAP.OSM;
+
+        function setupAutomaticBasemapSwitching() {
+            if (!mapEl || !mapEl.view) {
+                console.warn(
+                    "Cannot setup basemap switching: map view is not ready."
+                );
+                return;
+            }
+
+            const view = mapEl.view;
+
+            function updateBasemap(scale) {
+                if (!scale || Number.isNaN(scale)) {
+                    return;
+                }
+
+                /*
+                 * Zoom IN:
+                 *
+                 * Example:
+                 * 1:100,000 -> OSM
+                 * 1:60,000  -> OSM
+                 * 1:45,000  -> Imagery
+                 * 1:25,000  -> Imagery
+                 */
+                if (
+                    currentBasemap === BASEMAP.OSM &&
+                    scale <= BASEMAP.IMAGERY_ON_SCALE
+                ) {
+                    switchBasemap(BASEMAP.IMAGERY, scale);
+                    return;
+                }
+
+                /*
+                 * Zoom OUT:
+                 *
+                 * Example:
+                 * 1:25,000  -> Imagery
+                 * 1:45,000  -> Imagery
+                 * 1:60,000  -> OSM
+                 * 1:100,000 -> OSM
+                 */
+                if (
+                    currentBasemap === BASEMAP.IMAGERY &&
+                    scale >= BASEMAP.OSM_ON_SCALE
+                ) {
+                    switchBasemap(BASEMAP.OSM, scale);
+                }
+            }
+
+            function switchBasemap(basemapId, scale) {
+                if (currentBasemap === basemapId) {
+                    return;
+                }
+
+                currentBasemap = basemapId;
+
+                try {
+                    webmap.basemap = basemapId;
+
+                    console.log(
+                        `Basemap changed to "${basemapId}" at scale 1:${Math.round(
+                            scale
+                        )}`
+                    );
+                } catch (error) {
+                    console.error("Basemap switch failed:", error);
+                }
+            }
+
+            /*
+             * Set initial basemap according to the current map scale.
+             *
+             * If the map opens already zoomed in, we don't want to wait
+             * for the user to zoom before selecting the correct basemap.
+             */
+            if (view.scale <= BASEMAP.IMAGERY_ON_SCALE) {
+                currentBasemap = BASEMAP.IMAGERY;
+                webmap.basemap = BASEMAP.IMAGERY;
+            } else {
+                currentBasemap = BASEMAP.OSM;
+                webmap.basemap = BASEMAP.OSM;
+            }
+
+            /*
+             * Watch scale continuously.
+             */
+            view.watch("scale", (scale) => {
+                updateBasemap(scale);
+            });
+
+            console.log(
+                "Automatic basemap switching enabled.",
+                `OSM -> Imagery: 1:${BASEMAP.IMAGERY_ON_SCALE}`,
+                `Imagery -> OSM: 1:${BASEMAP.OSM_ON_SCALE}`
+            );
+        }
+
         const PIN_IMAGE = "./assets/pin.svg";
         const PIN_WIDTH = 28;
         const PIN_HEIGHT = 42;
@@ -398,7 +528,10 @@ $arcgis
         function dataURLtoFile(dataUrl, filename) {
             return fetch(dataUrl)
                 .then((res) => res.blob())
-                .then((blob) => new File([blob], filename, { type: blob.type }));
+                .then(
+                    (blob) =>
+                        new File([blob], filename, { type: blob.type })
+                );
         }
 
         function getLandmarkName(feature) {
@@ -482,7 +615,9 @@ $arcgis
         async function init() {
             try {
                 if (!mapEl) {
-                    alert("Kartes elements <arcgis-map> nav atrasts index.html failā.");
+                    alert(
+                        "Kartes elements <arcgis-map> nav atrasts index.html failā."
+                    );
                     return;
                 }
 
@@ -503,7 +638,9 @@ $arcgis
                 console.log(
                     "WebMap layers:",
                     webmap.layers.map((layer) => layer.title).toArray
-                        ? webmap.layers.map((layer) => layer.title).toArray()
+                        ? webmap.layers
+                              .map((layer) => layer.title)
+                              .toArray()
                         : webmap.layers.map((layer) => layer.title)
                 );
 
@@ -513,15 +650,34 @@ $arcgis
 
                 if (!landmarksLayer) {
                     console.error("Layer not found: Vietas");
+
                     alert(
                         "Tīmekļa kartē neizdevās atrast slāni “Vietas”. Pārbaudi, vai layer name tiešām ir Vietas."
                     );
+
                     return;
                 }
 
                 landmarksLayer.visible = false;
 
                 await mapEl.viewOnReady();
+
+                /*
+                 * =============================================================
+                 * AUTOMATIC BASEMAP SWITCHING
+                 * =============================================================
+                 *
+                 * OSM:
+                 *     zoomed out
+                 *
+                 * World Imagery:
+                 *     zoomed in
+                 *
+                 * The map starts with the correct basemap for its
+                 * current scale and then watches scale changes.
+                 * =============================================================
+                 */
+                setupAutomaticBasemapSwitching();
 
                 await loadGameData();
 
@@ -560,9 +716,11 @@ $arcgis
                     .then((featureSet) => {
                         console.log("FeatureSet:", featureSet);
 
-                        const landmarks = featureSet.features.filter((feature) => {
-                            return feature.geometry;
-                        });
+                        const landmarks = featureSet.features.filter(
+                            (feature) => {
+                                return feature.geometry;
+                            }
+                        );
 
                         landmarks.forEach((feature) => {
                             const photoUrl = feature.attributes.Photo;
@@ -593,7 +751,10 @@ $arcgis
                         return landmarks;
                     })
                     .catch((error) => {
-                        console.error("Error querying landmark data:", error);
+                        console.error(
+                            "Error querying landmark data:",
+                            error
+                        );
 
                         alert(
                             "Neizdevās ielādēt vietu datus. Pārbaudi, vai slānis “Vietas” ir publisks un vai tam ir ieslēgta Query/Extract piekļuve."
@@ -625,7 +786,10 @@ $arcgis
                 : landmarkPool.slice();
 
             if (CONFIG.roundsPerGame) {
-                allLandmarks = allLandmarks.slice(0, CONFIG.roundsPerGame);
+                allLandmarks = allLandmarks.slice(
+                    0,
+                    CONFIG.roundsPerGame
+                );
             }
 
             if (!allLandmarks.length) {
@@ -654,7 +818,11 @@ $arcgis
                 $("landmark-name").innerText = name;
             }
 
-            if (imageUrl && imageElements.container && imageElements.image) {
+            if (
+                imageUrl &&
+                imageElements.container &&
+                imageElements.image
+            ) {
                 imageElements.container.classList.remove("hidden");
                 imageElements.image.classList.add("hidden");
 
@@ -728,9 +896,12 @@ $arcgis
 
             function frame(now) {
                 const p = Math.min((now - start) / duration, 1);
-                const extra = dropHeight * (1 - easeOutBounce(p));
+                const extra =
+                    dropHeight * (1 - easeOutBounce(p));
 
-                graphic.symbol = makePinSymbol(PIN_REST_YOFFSET + extra);
+                graphic.symbol = makePinSymbol(
+                    PIN_REST_YOFFSET + extra
+                );
 
                 if (p < 1) {
                     requestAnimationFrame(frame);
@@ -749,14 +920,29 @@ $arcgis
             }
 
             if (x < 2 / d1) {
-                return n1 * (x -= 1.5 / d1) * x + 0.75;
+                return (
+                    n1 *
+                        (x -= 1.5 / d1) *
+                        x +
+                    0.75
+                );
             }
 
             if (x < 2.5 / d1) {
-                return n1 * (x -= 2.25 / d1) * x + 0.9375;
+                return (
+                    n1 *
+                        (x -= 2.25 / d1) *
+                        x +
+                    0.9375
+                );
             }
 
-            return n1 * (x -= 2.625 / d1) * x + 0.984375;
+            return (
+                n1 *
+                    (x -= 2.625 / d1) *
+                    x +
+                0.984375
+            );
         }
 
         function confirmGuess() {
@@ -764,8 +950,11 @@ $arcgis
 
             clicksEnabled = false;
 
-            const targetLandmark = allLandmarks[currentLandmarkIndex];
-            const targetGeometry = getTargetGeometry(targetLandmark);
+            const targetLandmark =
+                allLandmarks[currentLandmarkIndex];
+
+            const targetGeometry =
+                getTargetGeometry(targetLandmark);
 
             const scoring = CONFIG.scoring || {
                 pointsForHit: 10,
@@ -779,7 +968,10 @@ $arcgis
                 clickedPoint
             );
 
-            const hit = isDirectHit(targetGeometry, clickedPoint);
+            const hit = isDirectHit(
+                targetGeometry,
+                clickedPoint
+            );
 
             let roundScore;
 
@@ -787,10 +979,12 @@ $arcgis
                 roundScore = scoring.pointsForHit;
             } else {
                 const bands = Math.floor(
-                    distanceInMeters / scoring.bucketMeters
+                    distanceInMeters /
+                        scoring.bucketMeters
                 );
 
-                const penalty = bands * scoring.penaltyPerBucket;
+                const penalty =
+                    bands * scoring.penaltyPerBucket;
 
                 roundScore = Math.max(
                     scoring.minScore,
@@ -798,43 +992,56 @@ $arcgis
                 );
             }
 
-            const gotFullPoints = roundScore === scoring.pointsForHit;
+            const gotFullPoints =
+                roundScore === scoring.pointsForHit;
 
             let resultTitle;
             let resultMessage;
 
             if (gotFullPoints) {
                 resultTitle = t("correctTitle");
+
                 resultMessage = t("correctMessage", {
                     roundScore,
                 });
+
                 accuracyTracker.push(1);
             } else {
                 resultTitle = t("incorrectTitle");
+
                 resultMessage = t("incorrectMessage", {
-                    distance: Math.round(distanceInMeters),
+                    distance: Math.round(
+                        distanceInMeters
+                    ),
                     roundScore,
                 });
+
                 accuracyTracker.push(0);
             }
 
             totalScore += roundScore;
 
             if ($("round-result-title")) {
-                $("round-result-title").innerText = resultTitle;
+                $("round-result-title").innerText =
+                    resultTitle;
 
-                $("round-result-title").style.color = gotFullPoints
-                    ? "#16a34a"
-                    : "#dc2626";
+                $("round-result-title").style.color =
+                    gotFullPoints
+                        ? "#16a34a"
+                        : "#dc2626";
             }
 
             if ($("round-result-message")) {
-                $("round-result-message").innerHTML = resultMessage;
+                $("round-result-message").innerHTML =
+                    resultMessage;
             }
 
             const answerGraphic = new Graphic({
                 geometry: targetGeometry,
-                symbol: getResultSymbol(targetGeometry, gotFullPoints),
+                symbol: getResultSymbol(
+                    targetGeometry,
+                    gotFullPoints
+                ),
             });
 
             mapEl.graphics.add(answerGraphic);
@@ -856,7 +1063,10 @@ $arcgis
             }
 
             mapEl.goTo(target).catch((error) => {
-                if (error && error.name !== "AbortError") {
+                if (
+                    error &&
+                    error.name !== "AbortError"
+                ) {
                     console.error(error);
                 }
             });
@@ -871,8 +1081,12 @@ $arcgis
             }
 
             if (buttons.finishEarly) {
-                buttons.finishEarly.classList.remove("armed");
-                buttons.finishEarly.innerText = t("finishEarlyButton");
+                buttons.finishEarly.classList.remove(
+                    "armed"
+                );
+
+                buttons.finishEarly.innerText =
+                    t("finishEarlyButton");
             }
         }
 
@@ -880,10 +1094,17 @@ $arcgis
             if (!finishEarlyArmed) {
                 finishEarlyArmed = true;
 
-                buttons.finishEarly.classList.add("armed");
-                buttons.finishEarly.innerText = t("finishEarlyConfirm");
+                buttons.finishEarly.classList.add(
+                    "armed"
+                );
 
-                finishEarlyTimer = setTimeout(resetFinishEarly, 3000);
+                buttons.finishEarly.innerText =
+                    t("finishEarlyConfirm");
+
+                finishEarlyTimer = setTimeout(
+                    resetFinishEarly,
+                    3000
+                );
 
                 return;
             }
@@ -898,7 +1119,10 @@ $arcgis
         function nextRound() {
             currentLandmarkIndex++;
 
-            if (currentLandmarkIndex < allLandmarks.length) {
+            if (
+                currentLandmarkIndex <
+                allLandmarks.length
+            ) {
                 startRound();
             } else {
                 endGame();
@@ -911,43 +1135,59 @@ $arcgis
 
             updateUI();
 
-            const total = allLandmarks.length || 1;
-            const foundCount = accuracyTracker.filter(
-                (value) => value === 1
-            ).length;
+            const total =
+                allLandmarks.length || 1;
 
-            const accuracy = Math.round((foundCount / total) * 100);
+            const foundCount =
+                accuracyTracker.filter(
+                    (value) => value === 1
+                ).length;
+
+            const accuracy = Math.round(
+                (foundCount / total) * 100
+            );
+
             const foundText = `${foundCount} / ${allLandmarks.length}`;
 
             if ($("total-score")) {
-                $("total-score").innerText = totalScore;
+                $("total-score").innerText =
+                    totalScore;
             }
 
             if ($("accuracy")) {
-                $("accuracy").innerText = `${accuracy}%`;
+                $("accuracy").innerText =
+                    `${accuracy}%`;
             }
 
             if ($("found-count")) {
-                $("found-count").innerText = foundText;
+                $("found-count").innerText =
+                    foundText;
             }
 
             if ($("share-card-score")) {
-                $("share-card-score").innerText = totalScore;
+                $("share-card-score").innerText =
+                    totalScore;
             }
 
             if ($("share-card-accuracy")) {
-                $("share-card-accuracy").innerText = `${accuracy}%`;
+                $("share-card-accuracy").innerText =
+                    `${accuracy}%`;
             }
 
             if ($("share-card-found")) {
-                $("share-card-found").innerText = foundText;
+                $("share-card-found").innerText =
+                    foundText;
             }
         }
 
         function shareResults() {
             const shareCard = $("share-card");
 
-            if (!shareCard || typeof html2canvas === "undefined") {
+            if (
+                !shareCard ||
+                typeof html2canvas ===
+                    "undefined"
+            ) {
                 return;
             }
 
@@ -956,7 +1196,8 @@ $arcgis
                 .toLowerCase()}-results.png`;
 
             shareCard.classList.remove("hidden");
-            shareCard.style.position = "absolute";
+            shareCard.style.position =
+                "absolute";
             shareCard.style.left = "-9999px";
 
             setTimeout(() => {
@@ -965,9 +1206,15 @@ $arcgis
                     useCORS: true,
                 })
                     .then((canvas) => {
-                        const dataUrl = canvas.toDataURL("image/png");
+                        const dataUrl =
+                            canvas.toDataURL(
+                                "image/png"
+                            );
 
-                        return dataURLtoFile(dataUrl, fileName).then((file) => ({
+                        return dataURLtoFile(
+                            dataUrl,
+                            fileName
+                        ).then((file) => ({
                             dataUrl,
                             file,
                         }));
@@ -978,27 +1225,44 @@ $arcgis
                         if (
                             navigator.share &&
                             navigator.canShare &&
-                            navigator.canShare({ files: [file] })
+                            navigator.canShare({
+                                files: [file],
+                            })
                         ) {
                             return navigator.share({
-                                title: t("shareCardTitle"),
-                                text: t("shareText", {
-                                    score: totalScore,
-                                }),
+                                title: t(
+                                    "shareCardTitle"
+                                ),
+                                text: t(
+                                    "shareText",
+                                    {
+                                        score:
+                                            totalScore,
+                                    }
+                                ),
                                 files: [file],
                             });
                         }
 
-                        if ($("share-image-preview")) {
-                            $("share-image-preview").src = dataUrl;
+                        if (
+                            $("share-image-preview")
+                        ) {
+                            $(
+                                "share-image-preview"
+                            ).src = dataUrl;
                         }
 
                         if (panels.shareModal) {
-                            panels.shareModal.classList.remove("hidden");
+                            panels.shareModal.classList.remove(
+                                "hidden"
+                            );
                         }
                     })
                     .catch((error) => {
-                        console.error("Share error:", error);
+                        console.error(
+                            "Share error:",
+                            error
+                        );
 
                         hideShareCard();
                     });
@@ -1006,7 +1270,8 @@ $arcgis
         }
 
         function hideShareCard() {
-            const shareCard = $("share-card");
+            const shareCard =
+                $("share-card");
 
             if (!shareCard) return;
 
@@ -1016,13 +1281,17 @@ $arcgis
         }
 
         function showSubmitModal() {
-            if (!LEADERBOARD.enabled) return;
+            if (!LEADERBOARD.enabled)
+                return;
 
-            const fieldId = LEADERBOARD.submitScoreFieldId;
+            const fieldId =
+                LEADERBOARD.submitScoreFieldId;
 
             let url = `${LEADERBOARD.survey123Url}?${fieldId}=${totalScore}&hide=navbar,header,description,footer,${fieldId}`;
 
-            const surveyLang = currentLang() && currentLang().surveyLang;
+            const surveyLang =
+                currentLang() &&
+                currentLang().surveyLang;
 
             if (surveyLang) {
                 url += `&lang=${surveyLang}`;
@@ -1033,16 +1302,28 @@ $arcgis
             }
 
             if (panels.submitModal) {
-                panels.submitModal.classList.remove("hidden");
+                panels.submitModal.classList.remove(
+                    "hidden"
+                );
             }
         }
 
         function showLeaderboard() {
-            if (!LEADERBOARD.enabled) return;
+            if (!LEADERBOARD.enabled)
+                return;
 
-            panels.leaderboardModal.classList.remove("hidden");
-            panels.leaderboardLoading.classList.remove("hidden");
-            panels.leaderboardList.classList.add("hidden");
+            panels.leaderboardModal.classList.remove(
+                "hidden"
+            );
+
+            panels.leaderboardLoading.classList.remove(
+                "hidden"
+            );
+
+            panels.leaderboardList.classList.add(
+                "hidden"
+            );
+
             panels.leaderboardList.innerHTML = "";
 
             fetchLeaderboardData();
@@ -1054,74 +1335,148 @@ $arcgis
                 where: "1=1",
                 outFields: `${LEADERBOARD.firstNameField},${LEADERBOARD.lastNameField},${LEADERBOARD.scoreField}`,
                 orderByFields: `${LEADERBOARD.scoreField} DESC`,
-                resultRecordCount: LEADERBOARD.topN,
+                resultRecordCount:
+                    LEADERBOARD.topN,
             };
 
-            esriRequest(LEADERBOARD.dataApiUrl, {
-                query: queryParams,
-                responseType: "json",
-            })
+            esriRequest(
+                LEADERBOARD.dataApiUrl,
+                {
+                    query: queryParams,
+                    responseType: "json",
+                }
+            )
                 .then((response) => {
-                    const features = response.data.features;
-                    populateLeaderboard(features);
+                    const features =
+                        response.data.features;
+
+                    populateLeaderboard(
+                        features
+                    );
                 })
                 .catch((error) => {
-                    console.error("Leaderboard error:", error);
+                    console.error(
+                        "Leaderboard error:",
+                        error
+                    );
 
-                    panels.leaderboardLoading.classList.add("hidden");
-                    panels.leaderboardList.classList.remove("hidden");
+                    panels.leaderboardLoading.classList.add(
+                        "hidden"
+                    );
 
-                    panels.leaderboardList.innerHTML = `<li class="text-red-600">${t(
-                        "leaderboardError"
-                    )}</li>`;
+                    panels.leaderboardList.classList.remove(
+                        "hidden"
+                    );
+
+                    panels.leaderboardList.innerHTML =
+                        `<li class="text-red-600">${t(
+                            "leaderboardError"
+                        )}</li>`;
                 });
         }
 
         function populateLeaderboard(features) {
-            panels.leaderboardLoading.classList.add("hidden");
-            panels.leaderboardList.classList.remove("hidden");
+            panels.leaderboardLoading.classList.add(
+                "hidden"
+            );
 
-            if (!features || features.length === 0) {
-                panels.leaderboardList.innerHTML = `<li>${t("noScores")}</li>`;
+            panels.leaderboardList.classList.remove(
+                "hidden"
+            );
+
+            if (
+                !features ||
+                features.length === 0
+            ) {
+                panels.leaderboardList.innerHTML =
+                    `<li>${t(
+                        "noScores"
+                    )}</li>`;
+
                 return;
             }
 
-            features.forEach((feature, index) => {
-                const firstName =
-                    feature.attributes[LEADERBOARD.firstNameField] || "";
+            features.forEach(
+                (feature, index) => {
+                    const firstName =
+                        feature.attributes[
+                            LEADERBOARD
+                                .firstNameField
+                        ] || "";
 
-                const lastName =
-                    feature.attributes[LEADERBOARD.lastNameField] || "";
+                    const lastName =
+                        feature.attributes[
+                            LEADERBOARD
+                                .lastNameField
+                        ] || "";
 
-                const name = `${firstName} ${lastName}`.trim() || "Anonymous";
+                    const name =
+                        `${firstName} ${lastName}`.trim() ||
+                        "Anonymous";
 
-                const score = feature.attributes[LEADERBOARD.scoreField] || 0;
+                    const score =
+                        feature.attributes[
+                            LEADERBOARD
+                                .scoreField
+                        ] || 0;
 
-                const li = document.createElement("li");
-                li.className =
-                    "p-3 bg-gray-100 rounded-lg flex justify-between items-center";
+                    const li =
+                        document.createElement(
+                            "li"
+                        );
 
-                const nameSpan = document.createElement("span");
-                nameSpan.className = "font-bold text-lg text-blue-700";
-                nameSpan.textContent = `${index + 1}. ${name}`;
+                    li.className =
+                        "p-3 bg-gray-100 rounded-lg flex justify-between items-center";
 
-                const scoreSpan = document.createElement("span");
-                scoreSpan.className = "font-semibold text-lg";
-                scoreSpan.textContent = `${score} ${t("points")}`;
+                    const nameSpan =
+                        document.createElement(
+                            "span"
+                        );
 
-                li.appendChild(nameSpan);
-                li.appendChild(scoreSpan);
+                    nameSpan.className =
+                        "font-bold text-lg text-blue-700";
 
-                panels.leaderboardList.appendChild(li);
-            });
+                    nameSpan.textContent =
+                        `${index + 1}. ${name}`;
+
+                    const scoreSpan =
+                        document.createElement(
+                            "span"
+                        );
+
+                    scoreSpan.className =
+                        "font-semibold text-lg";
+
+                    scoreSpan.textContent =
+                        `${score} ${t(
+                            "points"
+                        )}`;
+
+                    li.appendChild(
+                        nameSpan
+                    );
+
+                    li.appendChild(
+                        scoreSpan
+                    );
+
+                    panels.leaderboardList.appendChild(
+                        li
+                    );
+                }
+            );
         }
 
         function applyStaticConfig() {
             document.title = `${CONFIG.appName} | ${CONFIG.tagline}`;
 
-            const logoAlt = `${CONFIG.appName} Logo`;
+            const logoAlt =
+                `${CONFIG.appName} Logo`;
 
-            [$("start-logo"), $("share-logo")].forEach((img) => {
+            [
+                $("start-logo"),
+                $("share-logo"),
+            ].forEach((img) => {
                 if (img) {
                     img.alt = logoAlt;
                 }
@@ -1129,18 +1484,28 @@ $arcgis
 
             if ($("share-card-footer")) {
                 $("share-card-footer").innerText =
-                    CONFIG.shareCardFooter || CONFIG.tagline;
+                    CONFIG.shareCardFooter ||
+                    CONFIG.tagline;
             }
 
             applySocialMeta();
 
-            if (!LEADERBOARD || !LEADERBOARD.enabled) {
+            if (
+                !LEADERBOARD ||
+                !LEADERBOARD.enabled
+            ) {
                 if (buttons.submitScore) {
-                    buttons.submitScore.classList.add("hidden");
+                    buttons.submitScore.classList.add(
+                        "hidden"
+                    );
                 }
 
-                if (buttons.viewLeaderboard) {
-                    buttons.viewLeaderboard.classList.add("hidden");
+                if (
+                    buttons.viewLeaderboard
+                ) {
+                    buttons.viewLeaderboard.classList.add(
+                        "hidden"
+                    );
                 }
             }
         }
@@ -1150,99 +1515,207 @@ $arcgis
 
             if (!s) return;
 
-            const setMeta = (selector, value) => {
-                if (value == null || value === "") return;
+            const setMeta = (
+                selector,
+                value
+            ) => {
+                if (
+                    value == null ||
+                    value === ""
+                ) {
+                    return;
+                }
 
-                const el = document.head.querySelector(selector);
+                const el =
+                    document.head.querySelector(
+                        selector
+                    );
 
                 if (el) {
-                    el.setAttribute("content", value);
+                    el.setAttribute(
+                        "content",
+                        value
+                    );
                 }
             };
 
-            setMeta('meta[name="description"]', s.description);
-            setMeta('meta[property="og:site_name"]', CONFIG.appName);
-            setMeta('meta[property="og:title"]', s.title);
-            setMeta('meta[property="og:description"]', s.description);
-            setMeta('meta[property="og:image"]', s.image);
-            setMeta('meta[property="og:url"]', s.url);
-            setMeta('meta[name="twitter:title"]', s.title);
-            setMeta('meta[name="twitter:description"]', s.description);
-            setMeta('meta[name="twitter:image"]', s.image);
-            setMeta('meta[name="twitter:site"]', s.twitterHandle);
-            setMeta('meta[name="twitter:creator"]', s.twitterHandle);
+            setMeta(
+                'meta[name="description"]',
+                s.description
+            );
+
+            setMeta(
+                'meta[property="og:site_name"]',
+                CONFIG.appName
+            );
+
+            setMeta(
+                'meta[property="og:title"]',
+                s.title
+            );
+
+            setMeta(
+                'meta[property="og:description"]',
+                s.description
+            );
+
+            setMeta(
+                'meta[property="og:image"]',
+                s.image
+            );
+
+            setMeta(
+                'meta[property="og:url"]',
+                s.url
+            );
+
+            setMeta(
+                'meta[name="twitter:title"]',
+                s.title
+            );
+
+            setMeta(
+                'meta[name="twitter:description"]',
+                s.description
+            );
+
+            setMeta(
+                'meta[name="twitter:image"]',
+                s.image
+            );
+
+            setMeta(
+                'meta[name="twitter:site"]',
+                s.twitterHandle
+            );
+
+            setMeta(
+                'meta[name="twitter:creator"]',
+                s.twitterHandle
+            );
         }
 
         if (mapEl) {
-            mapEl.addEventListener("arcgisViewClick", (event) => {
-                if (clicksEnabled) {
-                    handleMapClick(event.detail.mapPoint);
+            mapEl.addEventListener(
+                "arcgisViewClick",
+                (event) => {
+                    if (clicksEnabled) {
+                        handleMapClick(
+                            event.detail.mapPoint
+                        );
+                    }
                 }
-            });
+            );
         }
 
         if (buttons.langToggle) {
-            buttons.langToggle.addEventListener("click", toggleLanguage);
+            buttons.langToggle.addEventListener(
+                "click",
+                toggleLanguage
+            );
         }
 
         if (buttons.start) {
-            buttons.start.addEventListener("click", startGame);
+            buttons.start.addEventListener(
+                "click",
+                startGame
+            );
         }
 
         if (buttons.confirm) {
-            buttons.confirm.addEventListener("click", confirmGuess);
+            buttons.confirm.addEventListener(
+                "click",
+                confirmGuess
+            );
         }
 
         if (buttons.next) {
-            buttons.next.addEventListener("click", nextRound);
+            buttons.next.addEventListener(
+                "click",
+                nextRound
+            );
         }
 
         if (buttons.finishEarly) {
-            buttons.finishEarly.addEventListener("click", handleFinishEarly);
+            buttons.finishEarly.addEventListener(
+                "click",
+                handleFinishEarly
+            );
         }
 
         if (buttons.playAgain) {
-            buttons.playAgain.addEventListener("click", startGame);
+            buttons.playAgain.addEventListener(
+                "click",
+                startGame
+            );
         }
 
         if (buttons.share) {
-            buttons.share.addEventListener("click", shareResults);
+            buttons.share.addEventListener(
+                "click",
+                shareResults
+            );
         }
 
         if (buttons.closeModal) {
-            buttons.closeModal.addEventListener("click", () => {
-                if (panels.shareModal) {
-                    panels.shareModal.classList.add("hidden");
+            buttons.closeModal.addEventListener(
+                "click",
+                () => {
+                    if (panels.shareModal) {
+                        panels.shareModal.classList.add(
+                            "hidden"
+                        );
+                    }
                 }
-            });
+            );
         }
 
         if (buttons.submitScore) {
-            buttons.submitScore.addEventListener("click", showSubmitModal);
+            buttons.submitScore.addEventListener(
+                "click",
+                showSubmitModal
+            );
         }
 
         if (buttons.viewLeaderboard) {
-            buttons.viewLeaderboard.addEventListener("click", showLeaderboard);
+            buttons.viewLeaderboard.addEventListener(
+                "click",
+                showLeaderboard
+            );
         }
 
         if (buttons.closeSubmitModal) {
-            buttons.closeSubmitModal.addEventListener("click", () => {
-                if (panels.submitModal) {
-                    panels.submitModal.classList.add("hidden");
-                }
+            buttons.closeSubmitModal.addEventListener(
+                "click",
+                () => {
+                    if (panels.submitModal) {
+                        panels.submitModal.classList.add(
+                            "hidden"
+                        );
+                    }
 
-                if ($("survey-iframe")) {
-                    $("survey-iframe").src = "";
+                    if ($("survey-iframe")) {
+                        $("survey-iframe").src = "";
+                    }
                 }
-            });
+            );
         }
 
-        if (buttons.closeLeaderboardModal) {
-            buttons.closeLeaderboardModal.addEventListener("click", () => {
-                if (panels.leaderboardModal) {
-                    panels.leaderboardModal.classList.add("hidden");
+        if (
+            buttons.closeLeaderboardModal
+        ) {
+            buttons.closeLeaderboardModal.addEventListener(
+                "click",
+                () => {
+                    if (
+                        panels.leaderboardModal
+                    ) {
+                        panels.leaderboardModal.classList.add(
+                            "hidden"
+                        );
+                    }
                 }
-            });
+            );
         }
 
         applyStaticConfig();
@@ -1252,18 +1725,28 @@ $arcgis
         updateUI();
 
         window.skipToResults = () => {
-            console.log("Skipping to results with a random score.");
+            console.log(
+                "Skipping to results with a random score."
+            );
 
             if (allLandmarks.length === 0) {
-                allLandmarks = new Array(5).fill(1);
+                allLandmarks =
+                    new Array(5).fill(1);
             }
 
             totalScore =
-                Math.floor(Math.random() * (allLandmarks.length * 8)) + 10;
+                Math.floor(
+                    Math.random() *
+                        (allLandmarks.length *
+                            8)
+                ) + 10;
 
-            accuracyTracker = allLandmarks.map(() =>
-                Math.random() > 0.5 ? 1 : 0
-            );
+            accuracyTracker =
+                allLandmarks.map(() =>
+                    Math.random() > 0.5
+                        ? 1
+                        : 0
+                );
 
             endGame();
         };
