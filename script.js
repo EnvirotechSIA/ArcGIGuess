@@ -1,44 +1,24 @@
 /* =============================================================================
  * ArcGIGuess — Game logic
  * =============================================================================
- * A "guess where it is" geography game built on the ArcGIS Maps SDK for
- * JavaScript. Players see a landmark's name and photo and click the map where
- * they think it is; points are awarded based on how close they get.
- *
- * You normally do NOT need to edit this file — all of the things you'd want to
- * change (web map, layer, scoring, languages, branding, leaderboard) live in
- * config.js. This file just reads that config and runs the game.
- *
- * High-level flow:
- *   init()          -> load the web map + landmark layer, then query landmarks
- *   startGame()     -> pick/shuffle the rounds for a new game
- *   startRound()    -> show a landmark, wait for the player's map click
- *   confirmGuess()  -> score the guess against the landmark's polygon
- *   endGame()       -> show total score + accuracy, offer share/submit
- *
- * Core modules are loaded from the ArcGIS CDN via the global `$arcgis.import()`
- * helper, and the map is rendered by the <arcgis-map> web component.
+ * Pazudusī Latvija — Atrodi vietu kartē
  * ========================================================================== */
+
 $arcgis
     .import([
         "@arcgis/core/config.js",
         "@arcgis/core/WebMap.js",
         "@arcgis/core/Graphic.js",
         "@arcgis/core/request.js",
-        "@arcgis/core/geometry/operators/containsOperator.js",
         "@arcgis/core/geometry/operators/distanceOperator.js",
     ])
-    .then(([esriConfig, WebMap, Graphic, esriRequest, containsOperator, distanceOperator]) => {
-        // -------------------------------------------------------------------
-        // All settings live in config.js (exposed as window.ARCGIGUESS_CONFIG).
-        // Edit THAT file — not this one — to make the game your own.
-        // -------------------------------------------------------------------
+    .then(([esriConfig, WebMap, Graphic, esriRequest, distanceOperator]) => {
         const CONFIG = window.ARCGIGUESS_CONFIG;
-        const LEADERBOARD = CONFIG.leaderboard;
+        const LEADERBOARD = CONFIG.leaderboard || {};
 
-        // --- DOM Elements ---
         const $ = (id) => document.getElementById(id);
         const mapEl = document.querySelector("arcgis-map");
+
         const panels = {
             start: $("start-panel"),
             loading: $("loading-panel"),
@@ -51,6 +31,7 @@ $arcgis
             leaderboardLoading: $("leaderboard-loading"),
             leaderboardList: $("leaderboard-list"),
         };
+
         const buttons = {
             langToggle: $("lang-toggle"),
             start: $("start-button"),
@@ -72,39 +53,39 @@ $arcgis
             spinner: $("image-spinner"),
         };
 
-        // --- Languages ---
-        // Every piece of on-screen text and each language's settings come from
-        // config.js. The first language in the array is the default one.
-        const LANGUAGES = CONFIG.languages;
+        const LANGUAGES = CONFIG.languages || [];
         const LANG_BY_CODE = {};
-        LANGUAGES.forEach((lang) => (LANG_BY_CODE[lang.code] = lang));
+
+        LANGUAGES.forEach((lang) => {
+            LANG_BY_CODE[lang.code] = lang;
+        });
+
         const DEFAULT_LANG = LANGUAGES[0];
 
-        // --- Game State ---
-        let currentLanguage = DEFAULT_LANG.code;
-        let gameState = "LOADING"; // START, LOADING, PLAYING, ROUND_RESULT, GAME_OVER
-        let landmarkPool = []; // Every landmark loaded from the layer (the master list).
-        let allLandmarks = []; // The landmarks selected for the current game.
+        let currentLanguage = DEFAULT_LANG ? DEFAULT_LANG.code : "lv";
+        let gameState = "LOADING";
+
+        let landmarkPool = [];
+        let allLandmarks = [];
+
         let currentLandmarkIndex = 0;
         let totalScore = 0;
-        let accuracyTracker = []; // 1 for correct, 0 for incorrect
+        let accuracyTracker = [];
+
         let clickedPoint = null;
-        let webmap, landmarksLayer;
-        // Whether a map click currently counts as placing a guess (see startRound).
+
+        let webmap;
+        let landmarksLayer;
+
         let clicksEnabled = false;
-        // "Finish early" needs two taps to confirm; these track that armed state.
+
         let finishEarlyArmed = false;
         let finishEarlyTimer = null;
 
-        // Graphics Symbols
-        // The player's guess is shown as a pushpin (fitting the app's name). The
-        // artwork is a plain file (assets/pin.svg) — replace that file to restyle
-        // it. It's drawn on the map canvas, so we animate it by swapping the
-        // symbol's offset each frame (see animatePinDrop below).
-        const PIN_IMAGE = "./assets/pin.svg"; // replace this file to restyle the pin
-        const PIN_WIDTH = 28; // matches the 24:36 (2:3) artwork aspect ratio
+        const PIN_IMAGE = "./assets/pin.svg";
+        const PIN_WIDTH = 28;
         const PIN_HEIGHT = 42;
-        const PIN_REST_YOFFSET = PIN_HEIGHT / 2; // lifts the pin's tip onto the clicked point
+        const PIN_REST_YOFFSET = PIN_HEIGHT / 2;
 
         function makePinSymbol(yoffset) {
             return {
@@ -112,68 +93,76 @@ $arcgis
                 url: PIN_IMAGE,
                 width: PIN_WIDTH,
                 height: PIN_HEIGHT,
-                yoffset: yoffset,
+                yoffset,
             };
         }
 
-        const correctSymbol = {
+        const correctPointSymbol = {
+            type: "simple-marker",
+            style: "circle",
+            color: [22, 163, 74, 0.95],
+            size: 16,
+            outline: {
+                color: "white",
+                width: 3,
+            },
+        };
+
+        const correctAreaSymbol = {
             type: "simple-fill",
-            color: [50, 205, 50, 0.3], // Translucent green
+            color: [50, 205, 50, 0.3],
             outline: {
                 color: "white",
                 width: 2,
             },
         };
 
-        const incorrectSymbol = {
+        const incorrectAreaSymbol = {
             type: "simple-fill",
-            color: [220, 20, 60, 0.3], // Translucent red
+            color: [220, 20, 60, 0.3],
             outline: {
                 color: "white",
                 width: 2,
             },
         };
 
-        // --- Helper Functions ---
-
-        /**
-         * Return the config object for the language currently in use.
-         */
         function currentLang() {
             return LANG_BY_CODE[currentLanguage] || DEFAULT_LANG;
         }
 
-        /**
-         * Look up a translated string by key and fill in any {placeholders}.
-         * Falls back to the default language, then to the key itself.
-         * `{appName}` is always available without passing it in.
-         */
         function t(key, replacements = {}) {
             const active = currentLang();
+
             let text =
-                (active.strings && active.strings[key]) ||
-                DEFAULT_LANG.strings[key] ||
+                (active &&
+                    active.strings &&
+                    active.strings[key]) ||
+                (DEFAULT_LANG &&
+                    DEFAULT_LANG.strings &&
+                    DEFAULT_LANG.strings[key]) ||
                 key;
-            // `{appName}` and `{url}` (from config.social.url) are always available.
+
             const values = {
-                appName: CONFIG.appName,
+                appName: CONFIG.appName || "",
                 url: (CONFIG.social && CONFIG.social.url) || "",
                 ...replacements,
             };
+
             for (const [placeholder, value] of Object.entries(values)) {
-                // split/join replaces every occurrence of the placeholder.
                 text = text.split(`{${placeholder}}`).join(value);
             }
+
             return text;
         }
 
-        /**
-         * Build the human-readable scoring explanation shown on the start
-         * screen, straight from the numbers in CONFIG.scoring — so the text
-         * can never disagree with the actual scoring rules.
-         */
         function buildScoringSummary() {
-            const s = CONFIG.scoring;
+            const s = CONFIG.scoring || {
+                pointsForHit: 10,
+                bucketMeters: 500,
+                penaltyPerBucket: 1,
+                minScore: 0,
+            };
+
             return t("scoringSummaryTemplate", {
                 points: s.pointsForHit,
                 bucket: s.bucketMeters,
@@ -182,539 +171,733 @@ $arcgis
             });
         }
 
-        /**
-         * Update all UI text and panel visibility based on state
-         */
+        function showPanel(panelName) {
+            for (const panel of Object.values(panels)) {
+                if (panel) {
+                    panel.classList.add("hidden");
+                }
+            }
+
+            if (panels[panelName]) {
+                panels[panelName].classList.remove("hidden");
+            }
+        }
+
         function updateUI() {
-            // Update language and text direction from the active language config.
+            const activeLang = currentLang();
+
             document.documentElement.lang = currentLanguage;
-            document.body.dir = currentLang().dir;
+            document.body.dir = (activeLang && activeLang.dir) || "ltr";
 
-            // Toggle button text (label defined per-language in config)
-            buttons.langToggle.innerText = currentLang().toggleLabel;
+            if (buttons.langToggle) {
+                buttons.langToggle.innerText =
+                    (activeLang && activeLang.toggleLabel) ||
+                    currentLanguage.toUpperCase();
 
-            // If there's only one language configured, hide the toggle entirely.
-            buttons.langToggle.classList.toggle("hidden", LANGUAGES.length < 2);
+                buttons.langToggle.classList.toggle(
+                    "hidden",
+                    LANGUAGES.length < 2
+                );
+            }
 
-            // Translate all static text
-            // Start Panel
-            $("welcome-title").innerHTML = t("welcomeTitle");
-            // The scoring summary is generated from CONFIG.scoring and injected
-            // into the welcome description.
-            $("welcome-desc").innerHTML = t("welcomeDesc", {
-                scoringSummary: buildScoringSummary(),
-            });
-            buttons.start.innerText = t("startButton");
+            if ($("welcome-title")) {
+                $("welcome-title").innerHTML = t("welcomeTitle");
+            }
 
-            // Loading Panel
-            $("loading-text").innerText = t("loadingText");
+            if ($("welcome-desc")) {
+                $("welcome-desc").innerHTML = t("welcomeDesc", {
+                    scoringSummary: buildScoringSummary(),
+                });
+            }
 
-            // Game Panel
-            $("find-landmark-text").innerText = t("findLandmarkText");
-            $("score-display").innerText = t("scoreDisplay", {
-                score: totalScore,
-            });
-            if (allLandmarks.length > 0) {
+            if (buttons.start) {
+                buttons.start.innerText = t("startButton");
+            }
+
+            if ($("loading-text")) {
+                $("loading-text").innerText = t("loadingText");
+            }
+
+            if ($("find-landmark-text")) {
+                $("find-landmark-text").innerText = t("findLandmarkText");
+            }
+
+            if ($("score-display")) {
+                $("score-display").innerText = t("scoreDisplay", {
+                    score: totalScore,
+                });
+            }
+
+            if ($("round-display") && allLandmarks.length > 0) {
                 $("round-display").innerText = t("roundDisplay", {
                     current: currentLandmarkIndex + 1,
                     total: allLandmarks.length,
                 });
             }
 
-            // Confirm Panel
-            buttons.confirm.innerText = t("confirmButton");
+            if (buttons.confirm) {
+                buttons.confirm.innerText = t("confirmButton");
+            }
 
-            // Finish-early button: only while playing, and only if there are
-            // still rounds left to skip. Keep its label unless it's "armed".
             const canFinishEarly =
                 CONFIG.allowFinishEarly &&
                 gameState === "PLAYING" &&
                 currentLandmarkIndex < allLandmarks.length - 1;
-            buttons.finishEarly.classList.toggle("hidden", !canFinishEarly);
-            if (!finishEarlyArmed) {
-                buttons.finishEarly.innerText = t("finishEarlyButton");
+
+            if (buttons.finishEarly) {
+                buttons.finishEarly.classList.toggle("hidden", !canFinishEarly);
+
+                if (!finishEarlyArmed) {
+                    buttons.finishEarly.innerText = t("finishEarlyButton");
+                }
             }
 
-            // Round Result Panel
-            buttons.next.innerText = t(
-                currentLandmarkIndex === allLandmarks.length - 1
-                    ? "gameOverButton"
-                    : "nextButton"
-            );
+            if (buttons.next) {
+                buttons.next.innerText = t(
+                    currentLandmarkIndex === allLandmarks.length - 1
+                        ? "gameOverButton"
+                        : "nextButton"
+                );
+            }
 
-            // Game Over Panel
-            $("game-over-title").innerText = t("gameOverTitle");
-            $("final-score-text").innerText = t("finalScoreText");
-            $("total-score-label").innerText = t("totalScoreLabel");
-            $("accuracy-label").innerText = t("accuracyLabel");
-            $("found-label").innerText = t("foundLabel");
-            buttons.playAgain.innerText = t("playAgainButton");
-            buttons.share.innerText = t("shareButton");
-            buttons.submitScore.innerText = t("submitScoreButton");
-            buttons.viewLeaderboard.innerText = t("viewLeaderboardButton");
+            if ($("game-over-title")) {
+                $("game-over-title").innerText = t("gameOverTitle");
+            }
 
+            if ($("final-score-text")) {
+                $("final-score-text").innerText = t("finalScoreText");
+            }
 
-            // Share Modal
-            $("share-modal-title").innerText = t("shareModalTitle");
-            $("share-modal-desc").innerText = t("shareModalDesc");
-            
-            
-            $("submit-modal-title").innerText = t("submitModalTitle");
-            $("leaderboard-modal-title").innerText = t("leaderboardModalTitle");
-            $("leaderboard-loading-text").innerText = t("leaderboardLoadingText");
+            if ($("total-score-label")) {
+                $("total-score-label").innerText = t("totalScoreLabel");
+            }
 
+            if ($("accuracy-label")) {
+                $("accuracy-label").innerText = t("accuracyLabel");
+            }
 
-            // Share Card (Hidden)
-            $("share-card-title").innerText = t("shareCardTitle");
-            $("share-card-score-label").innerText = t("shareCardScoreLabel");
-            $("share-card-accuracy-label").innerText = t(
-                "shareCardAccuracyLabel"
-            );
-            $("share-card-found-label").innerText = t("foundLabel");
+            if ($("found-label")) {
+                $("found-label").innerText = t("foundLabel");
+            }
 
-            // Show/Hide Panels
-            for (const panel of Object.values(panels)) {
-                panel.classList.add("hidden");
+            if (buttons.playAgain) {
+                buttons.playAgain.innerText = t("playAgainButton");
+            }
+
+            if (buttons.share) {
+                buttons.share.innerText = t("shareButton");
+            }
+
+            if (buttons.submitScore) {
+                buttons.submitScore.innerText = t("submitScoreButton");
+            }
+
+            if (buttons.viewLeaderboard) {
+                buttons.viewLeaderboard.innerText = t("viewLeaderboardButton");
+            }
+
+            if ($("share-modal-title")) {
+                $("share-modal-title").innerText = t("shareModalTitle");
+            }
+
+            if ($("share-modal-desc")) {
+                $("share-modal-desc").innerText = t("shareModalDesc");
+            }
+
+            if ($("submit-modal-title")) {
+                $("submit-modal-title").innerText = t("submitModalTitle");
+            }
+
+            if ($("leaderboard-modal-title")) {
+                $("leaderboard-modal-title").innerText = t(
+                    "leaderboardModalTitle"
+                );
+            }
+
+            if ($("leaderboard-loading-text")) {
+                $("leaderboard-loading-text").innerText = t(
+                    "leaderboardLoadingText"
+                );
+            }
+
+            if ($("share-card-title")) {
+                $("share-card-title").innerText = t("shareCardTitle");
+            }
+
+            if ($("share-card-score-label")) {
+                $("share-card-score-label").innerText = t("shareCardScoreLabel");
+            }
+
+            if ($("share-card-accuracy-label")) {
+                $("share-card-accuracy-label").innerText = t(
+                    "shareCardAccuracyLabel"
+                );
+            }
+
+            if ($("share-card-found-label")) {
+                $("share-card-found-label").innerText = t("foundLabel");
             }
 
             switch (gameState) {
                 case "LOADING":
-                    panels.loading.classList.remove("hidden");
+                    showPanel("loading");
                     break;
+
                 case "START":
-                    panels.start.classList.remove("hidden");
+                    showPanel("start");
                     break;
+
                 case "PLAYING":
-                    panels.game.classList.remove("hidden");
-                    // The Confirm button lives inside the game panel and only
-                    // appears once the player has placed a guess on the map.
-                    buttons.confirm.classList.toggle("hidden", !clickedPoint);
+                    showPanel("game");
+
+                    if (buttons.confirm) {
+                        buttons.confirm.classList.toggle("hidden", !clickedPoint);
+                    }
                     break;
+
                 case "ROUND_RESULT":
-                    panels.roundResult.classList.remove("hidden");
+                    showPanel("roundResult");
                     break;
+
                 case "GAME_OVER":
-                    panels.gameOver.classList.remove("hidden");
+                    showPanel("gameOver");
                     break;
             }
         }
 
-        /**
-         * Toggle language
-         */
         function toggleLanguage() {
-            // Cycle to the next language defined in config (wraps around),
-            // so this works whether there are two languages or ten.
-            const idx = LANGUAGES.findIndex((l) => l.code === currentLanguage);
+            if (LANGUAGES.length < 2) return;
+
+            const idx = LANGUAGES.findIndex(
+                (lang) => lang.code === currentLanguage
+            );
+
             currentLanguage = LANGUAGES[(idx + 1) % LANGUAGES.length].code;
 
-            // Re-render UI with new language
             updateUI();
 
-            // Update the dynamic landmark name if a round is in progress
-            if (gameState === "PLAYING") {
+            if (gameState === "PLAYING" && allLandmarks[currentLandmarkIndex]) {
                 const landmark = allLandmarks[currentLandmarkIndex];
-                $("landmark-name").innerText =
-                    landmark.attributes[currentLang().landmarkNameField];
+
+                if ($("landmark-name")) {
+                    $("landmark-name").innerText = getLandmarkName(landmark);
+                }
             }
         }
 
-        /**
-         * Shuffle an array
-         */
         function shuffleArray(array) {
             for (let i = array.length - 1; i > 0; i--) {
                 const j = Math.floor(Math.random() * (i + 1));
+
                 [array[i], array[j]] = [array[j], array[i]];
             }
+
             return array;
         }
 
-        /**
-         * Convert data URL to File object (for Web Share API)
-         */
         function dataURLtoFile(dataUrl, filename) {
             return fetch(dataUrl)
                 .then((res) => res.blob())
-                .then((blob) => {
-                    return new File([blob], filename, { type: blob.type });
-                });
+                .then((blob) => new File([blob], filename, { type: blob.type }));
         }
 
-        // --- Game Logic Functions ---
+        function getLandmarkName(feature) {
+            if (!feature || !feature.attributes) {
+                return "Nezināma vieta";
+            }
 
-        /**
-         * Initialize the map and load game data
-         */
+            const lang = currentLang();
+            const field = (lang && lang.landmarkNameField) || "Name";
+
+            return feature.attributes[field] || "Nezināma vieta";
+        }
+
+        function getLandmarkPhoto(feature) {
+            if (!feature || !feature.attributes) {
+                return null;
+            }
+
+            if (feature.attributes.imageUrl) {
+                return String(feature.attributes.imageUrl).trim();
+            }
+
+            const field = CONFIG.landmarkPhotoField || "Photo";
+            const value = feature.attributes[field];
+
+            if (!value) return null;
+
+            return String(value).trim();
+        }
+
+        function getTargetGeometry(feature) {
+            return feature ? feature.geometry : null;
+        }
+
+        function getDistanceMeters(targetGeometry, guessPoint) {
+            if (!targetGeometry || !guessPoint) return 0;
+
+            try {
+                const distance = distanceOperator.execute(
+                    targetGeometry,
+                    guessPoint,
+                    {
+                        unit: "meters",
+                    }
+                );
+
+                if (typeof distance === "number" && !Number.isNaN(distance)) {
+                    return Math.max(0, distance);
+                }
+            } catch (error) {
+                console.warn("Distance calculation failed:", error);
+            }
+
+            return 0;
+        }
+
+        function isDirectHit(targetGeometry, guessPoint) {
+            if (!targetGeometry || !guessPoint) return false;
+
+            const scoring = CONFIG.scoring || {
+                bucketMeters: 500,
+            };
+
+            const distance = getDistanceMeters(targetGeometry, guessPoint);
+
+            return distance <= scoring.bucketMeters;
+        }
+
+        function getResultSymbol(geometry, gotFullPoints) {
+            if (!geometry) {
+                return correctPointSymbol;
+            }
+
+            if (geometry.type === "polygon" || geometry.type === "extent") {
+                return gotFullPoints ? correctAreaSymbol : incorrectAreaSymbol;
+            }
+
+            return correctPointSymbol;
+        }
+
         async function init() {
             try {
-                // Point the SDK at an ArcGIS Enterprise portal if one is
-                // configured; otherwise it defaults to ArcGIS Online. This
-                // must be set before the web map loads so item requests and
-                // any sign-in prompts target the right portal.
+                if (!mapEl) {
+                    alert("Kartes elements <arcgis-map> nav atrasts index.html failā.");
+                    return;
+                }
+
                 if (CONFIG.portalUrl) {
                     esriConfig.portalUrl = CONFIG.portalUrl;
                 }
 
-                // Create the web map and hand it to the <arcgis-map> component.
                 webmap = new WebMap({
                     portalItem: {
                         id: CONFIG.webMapItemId,
                     },
                 });
+
                 mapEl.map = webmap;
 
-                // Load the web map so we can find the landmarks layer by title.
                 await webmap.load();
+
+                console.log(
+                    "WebMap layers:",
+                    webmap.layers.map((layer) => layer.title).toArray
+                        ? webmap.layers.map((layer) => layer.title).toArray()
+                        : webmap.layers.map((layer) => layer.title)
+                );
+
                 landmarksLayer = webmap.layers.find(
-                    (layer) => layer.title === CONFIG.landmarkLayerTitle
+                    (layer) => layer.title === "Vietas"
                 );
 
                 if (!landmarksLayer) {
-                    console.error(
-                        `Could not find layer '${CONFIG.landmarkLayerTitle}'`
+                    console.error("Layer not found: Vietas");
+                    alert(
+                        "Tīmekļa kartē neizdevās atrast slāni “Vietas”. Pārbaudi, vai layer name tiešām ir Vietas."
                     );
-                    alert(t("layerError"));
                     return;
                 }
 
-                // Hide the answer layer, then wait for the view and game data.
                 landmarksLayer.visible = false;
+
                 await mapEl.viewOnReady();
+
                 await loadGameData();
 
-                console.log("Map view ready and game data loaded.");
                 gameState = "START";
+
                 updateUI();
             } catch (error) {
-                console.error("Error during initialization:", error);
-                alert(t("webMapError"));
-                panels.loading.classList.remove("hidden");
+                console.error("Initialization error:", error);
+
+                alert(
+                    "Neizdevās ielādēt spēles datus. Pārbaudi Web Map ID, slāni “Vietas”, publisko piekļuvi un laukus FID/Name/Photo."
+                );
+
+                gameState = "LOADING";
+                updateUI();
             }
         }
 
-        /**
-         * Query all features from the landmarks layer
-         */
         function loadGameData() {
             try {
                 const query = landmarksLayer.createQuery();
-                query.where = "1=1"; // Get all features
-                // Request the name field for every configured language, plus the ID field.
-                const nameFields = CONFIG.languages.map(
-                    (l) => l.landmarkNameField
-                );
-                query.outFields = [
-                    ...new Set([...nameFields, CONFIG.landmarkIdField]),
-                ];
+
+                query.where = "1=1";
+
+                /*
+                 * Drošākais variants:
+                 * ņemam visus laukus, lai nekristu kļūda, ja FID/Photo/Name
+                 * ArcGIS pusē ir field alias vai lauks nav pieprasāms atsevišķi.
+                 */
+                query.outFields = ["*"];
+
                 query.returnGeometry = true;
 
                 return landmarksLayer
                     .queryFeatures(query)
                     .then((featureSet) => {
-                        // Keep the layer's natural order here; shuffling (if
-                        // enabled) happens per-game in startGame().
-                        allLandmarks = featureSet.features;
+                        console.log("FeatureSet:", featureSet);
 
-                        const attachmentPromises = allLandmarks.map(
-                            (feature) => {
-                                return landmarksLayer
-                                    .queryAttachments({
-                                        objectIds: [
-                                            feature.attributes[
-                                                CONFIG.landmarkIdField
-                                            ],
-                                        ],
-                                    })
-                                    .then((attachmentMap) => {
-                                        const objectId =
-                                            feature.attributes[
-                                                CONFIG.landmarkIdField
-                                            ];
-                                        const attachments =
-                                            attachmentMap[objectId];
+                        const landmarks = featureSet.features.filter((feature) => {
+                            return feature.geometry;
+                        });
 
-                                        if (
-                                            attachments &&
-                                            attachments.length > 0
-                                        ) {
-                                            feature.attributes.imageUrl =
-                                                attachments[0].url;
-                                        } else {
-                                            feature.attributes.imageUrl = null;
-                                        }
-                                        return feature;
-                                    });
-                            }
-                        );
-                        return Promise.all(attachmentPromises);
-                    })
-                    .then((landmarksWithImages) => {
-                        // Keep the full set as the master pool. Each game draws
-                        // (and optionally limits) its rounds from this list.
-                        landmarkPool = landmarksWithImages;
-                        allLandmarks = landmarksWithImages;
-                        console.log(
-                            "Landmarks and images loaded:",
-                            landmarkPool
-                        );
+                        landmarks.forEach((feature) => {
+                            const photoUrl = feature.attributes.Photo;
+
+                            feature.attributes.imageUrl = photoUrl
+                                ? String(photoUrl).trim()
+                                : null;
+                        });
+
+                        landmarkPool = landmarks;
+                        allLandmarks = landmarks.slice();
+
+                        console.log("Landmarks loaded:", landmarkPool);
+
+                        if (landmarkPool[0]) {
+                            console.log(
+                                "First feature attributes:",
+                                landmarkPool[0].attributes
+                            );
+                        }
+
+                        if (!landmarkPool.length) {
+                            alert(
+                                "Netika atrasta neviena vieta. Pārbaudi, vai slānī “Vietas” ir punkti/poligoni ar ģeometriju."
+                            );
+                        }
+
+                        return landmarks;
                     })
                     .catch((error) => {
-                        console.error(
-                            "Error querying features or attachments:",
-                            error
+                        console.error("Error querying landmark data:", error);
+
+                        alert(
+                            "Neizdevās ielādēt vietu datus. Pārbaudi, vai slānis “Vietas” ir publisks un vai tam ir ieslēgta Query/Extract piekļuve."
                         );
-                        alert("Could not load landmark data.");
+
                         return Promise.reject(error);
                     });
             } catch (error) {
                 console.error("Error creating query:", error);
-                alert("Could not load landmark data.");
+
+                alert("Neizdevās izveidot vietu datu pieprasījumu.");
+
                 return Promise.reject(error);
             }
         }
 
-        /**
-         * Start the game
-         */
         function startGame() {
-            // Reset game state
             currentLandmarkIndex = 0;
             totalScore = 0;
             accuracyTracker = [];
             clickedPoint = null;
-            mapEl.graphics.removeAll();
 
-            // Draw the rounds for this game from the master pool. Shuffle only
-            // if CONFIG.shuffleLandmarks is enabled; otherwise keep layer order.
+            if (mapEl.graphics) {
+                mapEl.graphics.removeAll();
+            }
+
             allLandmarks = CONFIG.shuffleLandmarks
                 ? shuffleArray(landmarkPool.slice())
                 : landmarkPool.slice();
+
             if (CONFIG.roundsPerGame) {
                 allLandmarks = allLandmarks.slice(0, CONFIG.roundsPerGame);
+            }
+
+            if (!allLandmarks.length) {
+                alert("Nav pieejamu vietu spēlei.");
+                return;
             }
 
             startRound();
         }
 
-        /**
-         * Start a new round
-         */
         function startRound() {
             clickedPoint = null;
-            mapEl.graphics.removeAll();
+
+            if (mapEl.graphics) {
+                mapEl.graphics.removeAll();
+            }
+
             resetFinishEarly();
 
             const landmark = allLandmarks[currentLandmarkIndex];
-            const name =
-                landmark.attributes[currentLang().landmarkNameField];
-            const imageUrl = landmark.attributes.imageUrl;
 
-            $("landmark-name").innerText = name;
+            const name = getLandmarkName(landmark);
+            const imageUrl = getLandmarkPhoto(landmark);
 
-            // Handle the image display
-            if (imageUrl) {
+            if ($("landmark-name")) {
+                $("landmark-name").innerText = name;
+            }
+
+            if (imageUrl && imageElements.container && imageElements.image) {
                 imageElements.container.classList.remove("hidden");
-                imageElements.image.classList.add("hidden"); // Hide img tag while loading
-                imageElements.spinner.classList.remove("hidden"); // Show spinner
+                imageElements.image.classList.add("hidden");
+
+                if (imageElements.spinner) {
+                    imageElements.spinner.classList.remove("hidden");
+                }
+
+                imageElements.image.onload = () => {
+                    imageElements.image.classList.remove("hidden");
+
+                    if (imageElements.spinner) {
+                        imageElements.spinner.classList.add("hidden");
+                    }
+                };
+
+                imageElements.image.onerror = () => {
+                    imageElements.container.classList.add("hidden");
+
+                    if (imageElements.spinner) {
+                        imageElements.spinner.classList.add("hidden");
+                    }
+                };
 
                 imageElements.image.src = imageUrl;
                 imageElements.image.alt = name;
-                imageElements.image.onload = () => {
-                    imageElements.image.classList.remove("hidden");
-                    imageElements.spinner.classList.add("hidden");
-                };
-                imageElements.image.onerror = () => {
-                    imageElements.container.classList.add("hidden");
-                };
             } else {
-                imageElements.container.classList.add("hidden");
+                if (imageElements.container) {
+                    imageElements.container.classList.add("hidden");
+                }
+
+                if (imageElements.spinner) {
+                    imageElements.spinner.classList.add("hidden");
+                }
+
+                if (imageElements.image) {
+                    imageElements.image.removeAttribute("src");
+                }
             }
 
             gameState = "PLAYING";
-            updateUI();
-
-            // Start accepting map clicks as guesses for this round.
             clicksEnabled = true;
+
+            updateUI();
         }
 
-        /**
-         * Handle user's click on the map
-         */
         function handleMapClick(mapPoint) {
+            if (!clicksEnabled) return;
+
             clickedPoint = mapPoint;
-            mapEl.graphics.removeAll();
+
+            if (mapEl.graphics) {
+                mapEl.graphics.removeAll();
+            }
+
             const pinGraphic = new Graphic({
                 geometry: clickedPoint,
                 symbol: makePinSymbol(PIN_REST_YOFFSET),
             });
+
             mapEl.graphics.add(pinGraphic);
+
             animatePinDrop(pinGraphic);
+
             updateUI();
         }
 
-        /**
-         * Animate a freshly-placed pin so it appears to drop from above and
-         * bounce into place. The marker is rendered on the map (not the DOM),
-         * so we nudge its vertical offset each frame instead of using CSS.
-         */
         function animatePinDrop(graphic) {
-            const dropHeight = 60; // starting height above rest, in points
-            const duration = 650; // ms
+            const dropHeight = 60;
+            const duration = 650;
             const start = performance.now();
 
             function frame(now) {
                 const p = Math.min((now - start) / duration, 1);
                 const extra = dropHeight * (1 - easeOutBounce(p));
+
                 graphic.symbol = makePinSymbol(PIN_REST_YOFFSET + extra);
-                if (p < 1) requestAnimationFrame(frame);
+
+                if (p < 1) {
+                    requestAnimationFrame(frame);
+                }
             }
+
             requestAnimationFrame(frame);
         }
 
-        /** Standard "ease out bounce" easing: 0 → 1 with a settling bounce. */
         function easeOutBounce(x) {
             const n1 = 7.5625;
             const d1 = 2.75;
+
             if (x < 1 / d1) {
                 return n1 * x * x;
-            } else if (x < 2 / d1) {
-                return n1 * (x -= 1.5 / d1) * x + 0.75;
-            } else if (x < 2.5 / d1) {
-                return n1 * (x -= 2.25 / d1) * x + 0.9375;
-            } else {
-                return n1 * (x -= 2.625 / d1) * x + 0.984375;
             }
+
+            if (x < 2 / d1) {
+                return n1 * (x -= 1.5 / d1) * x + 0.75;
+            }
+
+            if (x < 2.5 / d1) {
+                return n1 * (x -= 2.25 / d1) * x + 0.9375;
+            }
+
+            return n1 * (x -= 2.625 / d1) * x + 0.984375;
         }
 
-        /**
-         * User confirms their guess, time to score
-         */
         function confirmGuess() {
             if (!clickedPoint) return;
 
-            // Stop accepting further clicks while we score this guess.
             clicksEnabled = false;
 
             const targetLandmark = allLandmarks[currentLandmarkIndex];
-            const targetPolygon = targetLandmark.geometry;
+            const targetGeometry = getTargetGeometry(targetLandmark);
 
-            const isInside = containsOperator.execute(
-                targetPolygon,
+            const scoring = CONFIG.scoring || {
+                pointsForHit: 10,
+                bucketMeters: 500,
+                penaltyPerBucket: 1,
+                minScore: 0,
+            };
+
+            const distanceInMeters = getDistanceMeters(
+                targetGeometry,
                 clickedPoint
             );
 
-            let roundScore = 0;
-            let distanceInMeters = 0;
-            const scoring = CONFIG.scoring;
+            const hit = isDirectHit(targetGeometry, clickedPoint);
 
-            if (isInside) {
-                // A direct hit always earns the maximum.
+            let roundScore;
+
+            if (hit) {
                 roundScore = scoring.pointsForHit;
             } else {
-                distanceInMeters = distanceOperator.execute(
-                    targetPolygon,
-                    clickedPoint,
-                    { unit: "meters" }
-                );
-
-                // Lose `penaltyPerBucket` points for each full `bucketMeters`
-                // band the guess is off, never dropping below `minScore`.
                 const bands = Math.floor(
                     distanceInMeters / scoring.bucketMeters
                 );
+
                 const penalty = bands * scoring.penaltyPerBucket;
+
                 roundScore = Math.max(
                     scoring.minScore,
                     scoring.pointsForHit - penalty
                 );
             }
 
-            // A guess earns "full marks" either by landing inside the polygon or
-            // by being close enough that no penalty applies. Either way it counts
-            // as a find — for both the message shown and the accuracy stat — so
-            // the two can never contradict each other.
             const gotFullPoints = roundScore === scoring.pointsForHit;
 
             let resultTitle;
             let resultMessage;
-            let resultSymbol;
+
             if (gotFullPoints) {
                 resultTitle = t("correctTitle");
-                resultMessage = t("correctMessage", { roundScore: roundScore });
-                resultSymbol = correctSymbol;
+                resultMessage = t("correctMessage", {
+                    roundScore,
+                });
                 accuracyTracker.push(1);
             } else {
                 resultTitle = t("incorrectTitle");
                 resultMessage = t("incorrectMessage", {
                     distance: Math.round(distanceInMeters),
-                    roundScore: roundScore,
+                    roundScore,
                 });
-                resultSymbol = incorrectSymbol;
                 accuracyTracker.push(0);
             }
 
             totalScore += roundScore;
 
-            $("round-result-title").innerText = resultTitle;
-            $("round-result-message").innerHTML = resultMessage;
-            $("round-result-title").style.color = gotFullPoints
-                ? "#16a34a"
-                : "#dc2626";
+            if ($("round-result-title")) {
+                $("round-result-title").innerText = resultTitle;
 
-            const resultGraphic = new Graphic({
-                geometry: targetPolygon,
-                symbol: resultSymbol,
-            });
-            mapEl.graphics.add(resultGraphic);
+                $("round-result-title").style.color = gotFullPoints
+                    ? "#16a34a"
+                    : "#dc2626";
+            }
 
-            mapEl.goTo(targetPolygon.extent.expand(1.5)).catch((err) => {
-                // goTo rejects if its animation is interrupted — that's harmless.
-                if (err && err.name !== "AbortError") console.error(err);
+            if ($("round-result-message")) {
+                $("round-result-message").innerHTML = resultMessage;
+            }
+
+            const answerGraphic = new Graphic({
+                geometry: targetGeometry,
+                symbol: getResultSymbol(targetGeometry, gotFullPoints),
             });
+
+            mapEl.graphics.add(answerGraphic);
+
+            goToAnswer(targetGeometry);
 
             gameState = "ROUND_RESULT";
+
             updateUI();
         }
 
-        /**
-         * Reset the "finish early" button back to its unarmed state.
-         */
+        function goToAnswer(geometry) {
+            if (!geometry) return;
+
+            let target = geometry;
+
+            if (geometry.extent) {
+                target = geometry.extent.expand(1.8);
+            }
+
+            mapEl.goTo(target).catch((error) => {
+                if (error && error.name !== "AbortError") {
+                    console.error(error);
+                }
+            });
+        }
+
         function resetFinishEarly() {
             finishEarlyArmed = false;
+
             if (finishEarlyTimer) {
                 clearTimeout(finishEarlyTimer);
                 finishEarlyTimer = null;
             }
-            buttons.finishEarly.classList.remove("armed");
-            buttons.finishEarly.innerText = t("finishEarlyButton");
+
+            if (buttons.finishEarly) {
+                buttons.finishEarly.classList.remove("armed");
+                buttons.finishEarly.innerText = t("finishEarlyButton");
+            }
         }
 
-        /**
-         * "Finish early": the player accepts their current score (the remaining
-         * landmarks are left unplayed and count as missed) and jumps to the
-         * results. The first tap "arms" the button and the second confirms, so
-         * the game can't be ended by a stray click.
-         */
         function handleFinishEarly() {
             if (!finishEarlyArmed) {
                 finishEarlyArmed = true;
+
                 buttons.finishEarly.classList.add("armed");
                 buttons.finishEarly.innerText = t("finishEarlyConfirm");
+
                 finishEarlyTimer = setTimeout(resetFinishEarly, 3000);
+
                 return;
             }
 
             resetFinishEarly();
+
             clicksEnabled = false;
+
             endGame();
         }
 
-        /**
-         * Move to the next round or end the game
-         */
         function nextRound() {
             currentLandmarkIndex++;
+
             if (currentLandmarkIndex < allLandmarks.length) {
                 startRound();
             } else {
@@ -724,30 +907,50 @@ $arcgis
 
         function endGame() {
             gameState = "GAME_OVER";
+            clicksEnabled = false;
+
             updateUI();
 
             const total = allLandmarks.length || 1;
-            const foundCount = accuracyTracker.filter((a) => a === 1).length;
+            const foundCount = accuracyTracker.filter(
+                (value) => value === 1
+            ).length;
+
             const accuracy = Math.round((foundCount / total) * 100);
             const foundText = `${foundCount} / ${allLandmarks.length}`;
 
-            $("total-score").innerText = totalScore;
-            $("accuracy").innerText = `${accuracy}%`;
-            $("found-count").innerText = foundText;
+            if ($("total-score")) {
+                $("total-score").innerText = totalScore;
+            }
 
-            $("share-card-score").innerText = totalScore;
-            $("share-card-accuracy").innerText = `${accuracy}%`;
-            $("share-card-found").innerText = foundText;
+            if ($("accuracy")) {
+                $("accuracy").innerText = `${accuracy}%`;
+            }
+
+            if ($("found-count")) {
+                $("found-count").innerText = foundText;
+            }
+
+            if ($("share-card-score")) {
+                $("share-card-score").innerText = totalScore;
+            }
+
+            if ($("share-card-accuracy")) {
+                $("share-card-accuracy").innerText = `${accuracy}%`;
+            }
+
+            if ($("share-card-found")) {
+                $("share-card-found").innerText = foundText;
+            }
         }
 
-        /**
-         * Handle sharing the results
-         */
         function shareResults() {
             const shareCard = $("share-card");
-            // PNG: universally accepted by share targets and lossless, so the
-            // card's text stays crisp (WebP/JPEG can soften text and be rejected
-            // by some upload flows).
+
+            if (!shareCard || typeof html2canvas === "undefined") {
+                return;
+            }
+
             const fileName = `${CONFIG.appName
                 .replace(/\s+/g, "-")
                 .toLowerCase()}-results.png`;
@@ -757,90 +960,94 @@ $arcgis
             shareCard.style.left = "-9999px";
 
             setTimeout(() => {
-                html2canvas(shareCard, { scale: 2, useCORS: true })
+                html2canvas(shareCard, {
+                    scale: 2,
+                    useCORS: true,
+                })
                     .then((canvas) => {
                         const dataUrl = canvas.toDataURL("image/png");
-                        return dataURLtoFile(dataUrl, fileName).then(
-                            (file) => ({ dataUrl, file })
-                        );
+
+                        return dataURLtoFile(dataUrl, fileName).then((file) => ({
+                            dataUrl,
+                            file,
+                        }));
                     })
                     .then(({ dataUrl, file }) => {
                         hideShareCard();
+
                         if (
                             navigator.share &&
+                            navigator.canShare &&
                             navigator.canShare({ files: [file] })
                         ) {
                             return navigator.share({
                                 title: t("shareCardTitle"),
-                                text: t("shareText", { score: totalScore }),
+                                text: t("shareText", {
+                                    score: totalScore,
+                                }),
                                 files: [file],
                             });
-                        } else {
+                        }
+
+                        if ($("share-image-preview")) {
                             $("share-image-preview").src = dataUrl;
+                        }
+
+                        if (panels.shareModal) {
                             panels.shareModal.classList.remove("hidden");
                         }
                     })
                     .catch((error) => {
-                        console.error("Error sharing:", error);
+                        console.error("Share error:", error);
+
                         hideShareCard();
-                        html2canvas($("share-card"), { scale: 2, useCORS: true })
-                            .then((canvas) => {
-                                $("share-image-preview").src =
-                                    canvas.toDataURL("image/png");
-                                panels.shareModal.classList.remove("hidden");
-                            })
-                            .catch((e) => {
-                                console.error(
-                                    "Error generating fallback share image:",
-                                    e
-                                );
-                                hideShareCard();
-                            });
                     });
             }, 100);
         }
 
-        // Helper to hide the share card
         function hideShareCard() {
             const shareCard = $("share-card");
+
+            if (!shareCard) return;
+
             shareCard.classList.add("hidden");
             shareCard.style.position = "";
             shareCard.style.left = "";
         }
 
-        /**
-         * Opens the Survey123 modal with the score pre-filled
-         */
         function showSubmitModal() {
-            // Pre-fill the score field and hide the survey's chrome. The score
-            // field is also hidden so players can't tamper with the value.
+            if (!LEADERBOARD.enabled) return;
+
             const fieldId = LEADERBOARD.submitScoreFieldId;
+
             let url = `${LEADERBOARD.survey123Url}?${fieldId}=${totalScore}&hide=navbar,header,description,footer,${fieldId}`;
 
-            // Open the survey in the active language, if one is configured for it.
-            const surveyLang = currentLang().surveyLang;
+            const surveyLang = currentLang() && currentLang().surveyLang;
+
             if (surveyLang) {
                 url += `&lang=${surveyLang}`;
             }
-            $("survey-iframe").src = url;
-            panels.submitModal.classList.remove("hidden");
+
+            if ($("survey-iframe")) {
+                $("survey-iframe").src = url;
+            }
+
+            if (panels.submitModal) {
+                panels.submitModal.classList.remove("hidden");
+            }
         }
 
-        /**
-         * Opens the leaderboard modal and fetches data
-         */
         function showLeaderboard() {
+            if (!LEADERBOARD.enabled) return;
+
             panels.leaderboardModal.classList.remove("hidden");
             panels.leaderboardLoading.classList.remove("hidden");
             panels.leaderboardList.classList.add("hidden");
-            panels.leaderboardList.innerHTML = ""; // Clear old results
-            
+            panels.leaderboardList.innerHTML = "";
+
             fetchLeaderboardData();
         }
 
-        /**
-         * Fetches and displays the top 10 scores
-         */
         function fetchLeaderboardData() {
             const queryParams = {
                 f: "json",
@@ -859,34 +1066,37 @@ $arcgis
                     populateLeaderboard(features);
                 })
                 .catch((error) => {
-                    console.error("Error fetching leaderboard:", error);
+                    console.error("Leaderboard error:", error);
+
                     panels.leaderboardLoading.classList.add("hidden");
                     panels.leaderboardList.classList.remove("hidden");
-                    panels.leaderboardList.innerHTML = `<li class="text-red-600">${t("leaderboardError")}</li>`;
+
+                    panels.leaderboardList.innerHTML = `<li class="text-red-600">${t(
+                        "leaderboardError"
+                    )}</li>`;
                 });
         }
 
-        /**
-         * Populates the leaderboard list with data
-         */
         function populateLeaderboard(features) {
             panels.leaderboardLoading.classList.add("hidden");
             panels.leaderboardList.classList.remove("hidden");
-            
+
             if (!features || features.length === 0) {
-                 panels.leaderboardList.innerHTML = `<li>${t("noScores")}</li>`;
-                 return;
+                panels.leaderboardList.innerHTML = `<li>${t("noScores")}</li>`;
+                return;
             }
 
             features.forEach((feature, index) => {
-                // Combine the first and last name fields into one display name.
-                const firstName = feature.attributes[LEADERBOARD.firstNameField] || "";
-                const lastName = feature.attributes[LEADERBOARD.lastNameField] || "";
+                const firstName =
+                    feature.attributes[LEADERBOARD.firstNameField] || "";
+
+                const lastName =
+                    feature.attributes[LEADERBOARD.lastNameField] || "";
+
                 const name = `${firstName} ${lastName}`.trim() || "Anonymous";
+
                 const score = feature.attributes[LEADERBOARD.scoreField] || 0;
 
-                // Build with textContent (never innerHTML) so a player-submitted
-                // name can't inject HTML or script into the page.
                 const li = document.createElement("li");
                 li.className =
                     "p-3 bg-gray-100 rounded-lg flex justify-between items-center";
@@ -901,57 +1111,53 @@ $arcgis
 
                 li.appendChild(nameSpan);
                 li.appendChild(scoreSpan);
+
                 panels.leaderboardList.appendChild(li);
             });
         }
 
-        /**
-         * Apply one-time, config-driven branding and feature toggles to the DOM.
-         * Runs once at startup, before the map begins loading.
-         */
         function applyStaticConfig() {
-            // Browser tab title: "AppName | tagline".
             document.title = `${CONFIG.appName} | ${CONFIG.tagline}`;
 
-            // Logos live at assets/logo.svg (referenced directly in index.html).
-            // We only keep their alt text in sync with the app name here.
             const logoAlt = `${CONFIG.appName} Logo`;
+
             [$("start-logo"), $("share-logo")].forEach((img) => {
-                if (img) img.alt = logoAlt;
+                if (img) {
+                    img.alt = logoAlt;
+                }
             });
 
-            // Footer line on the shareable results card.
-            $("share-card-footer").innerText =
-                CONFIG.shareCardFooter || CONFIG.tagline;
+            if ($("share-card-footer")) {
+                $("share-card-footer").innerText =
+                    CONFIG.shareCardFooter || CONFIG.tagline;
+            }
 
-            // Keep the social link-preview <meta> tags in sync with config.
             applySocialMeta();
 
-            // If the leaderboard feature is off, hide its two buttons entirely.
             if (!LEADERBOARD || !LEADERBOARD.enabled) {
-                buttons.submitScore.classList.add("hidden");
-                buttons.viewLeaderboard.classList.add("hidden");
+                if (buttons.submitScore) {
+                    buttons.submitScore.classList.add("hidden");
+                }
+
+                if (buttons.viewLeaderboard) {
+                    buttons.viewLeaderboard.classList.add("hidden");
+                }
             }
         }
 
-        /**
-         * Mirror the CONFIG.social values into the page's Open Graph / Twitter
-         * <meta> tags.
-         *
-         * NOTE: link-preview crawlers (WhatsApp, LinkedIn, Facebook, X, Slack)
-         * do NOT execute JavaScript, so they read the STATIC tags in index.html,
-         * not the values set here. This keeps the two consistent for in-app use
-         * and JS-aware tools — but for guaranteed previews, also edit the static
-         * tags in index.html (see the README).
-         */
         function applySocialMeta() {
             const s = CONFIG.social;
+
             if (!s) return;
 
             const setMeta = (selector, value) => {
                 if (value == null || value === "") return;
+
                 const el = document.head.querySelector(selector);
-                if (el) el.setAttribute("content", value);
+
+                if (el) {
+                    el.setAttribute("content", value);
+                }
             };
 
             setMeta('meta[name="description"]', s.description);
@@ -967,56 +1173,98 @@ $arcgis
             setMeta('meta[name="twitter:creator"]', s.twitterHandle);
         }
 
-        // --- Event Listeners ---
-        // A single click listener on the map component; the `clicksEnabled` flag
-        // decides whether a click counts as placing a guess this round.
-        mapEl.addEventListener("arcgisViewClick", (event) => {
-            if (clicksEnabled) handleMapClick(event.detail.mapPoint);
-        });
+        if (mapEl) {
+            mapEl.addEventListener("arcgisViewClick", (event) => {
+                if (clicksEnabled) {
+                    handleMapClick(event.detail.mapPoint);
+                }
+            });
+        }
 
-        buttons.langToggle.addEventListener("click", toggleLanguage);
-        buttons.start.addEventListener("click", startGame);
-        buttons.confirm.addEventListener("click", confirmGuess);
-        buttons.next.addEventListener("click", nextRound);
-        buttons.finishEarly.addEventListener("click", handleFinishEarly);
-        buttons.playAgain.addEventListener("click", startGame);
-        buttons.share.addEventListener("click", shareResults);
-        buttons.closeModal.addEventListener("click", () => {
-            panels.shareModal.classList.add("hidden");
-        });
+        if (buttons.langToggle) {
+            buttons.langToggle.addEventListener("click", toggleLanguage);
+        }
 
-        buttons.submitScore.addEventListener("click", showSubmitModal);
-        buttons.viewLeaderboard.addEventListener("click", showLeaderboard);
-        buttons.closeSubmitModal.addEventListener("click", () => {
-            panels.submitModal.classList.add("hidden");
-            $("survey-iframe").src = ""; // Clear src to stop survey
-        });
-        buttons.closeLeaderboardModal.addEventListener("click", () => {
-            panels.leaderboardModal.classList.add("hidden");
-        });
+        if (buttons.start) {
+            buttons.start.addEventListener("click", startGame);
+        }
 
+        if (buttons.confirm) {
+            buttons.confirm.addEventListener("click", confirmGuess);
+        }
 
-        // Apply branding and feature toggles from config, then start up.
+        if (buttons.next) {
+            buttons.next.addEventListener("click", nextRound);
+        }
+
+        if (buttons.finishEarly) {
+            buttons.finishEarly.addEventListener("click", handleFinishEarly);
+        }
+
+        if (buttons.playAgain) {
+            buttons.playAgain.addEventListener("click", startGame);
+        }
+
+        if (buttons.share) {
+            buttons.share.addEventListener("click", shareResults);
+        }
+
+        if (buttons.closeModal) {
+            buttons.closeModal.addEventListener("click", () => {
+                if (panels.shareModal) {
+                    panels.shareModal.classList.add("hidden");
+                }
+            });
+        }
+
+        if (buttons.submitScore) {
+            buttons.submitScore.addEventListener("click", showSubmitModal);
+        }
+
+        if (buttons.viewLeaderboard) {
+            buttons.viewLeaderboard.addEventListener("click", showLeaderboard);
+        }
+
+        if (buttons.closeSubmitModal) {
+            buttons.closeSubmitModal.addEventListener("click", () => {
+                if (panels.submitModal) {
+                    panels.submitModal.classList.add("hidden");
+                }
+
+                if ($("survey-iframe")) {
+                    $("survey-iframe").src = "";
+                }
+            });
+        }
+
+        if (buttons.closeLeaderboardModal) {
+            buttons.closeLeaderboardModal.addEventListener("click", () => {
+                if (panels.leaderboardModal) {
+                    panels.leaderboardModal.classList.add("hidden");
+                }
+            });
+        }
+
         applyStaticConfig();
 
-        // Start the application
         init();
-        updateUI(); // Show loading screen initially
 
-        // --- Testing helper ---
-        // Open the browser console and call skipToResults() to jump straight to
-        // the results screen with a random score. Handy for styling that screen.
+        updateUI();
+
         window.skipToResults = () => {
-            console.log("Skipping to results with a random score...");
-            if (allLandmarks.length === 0) {
-                 // Mock data if landmarks haven't loaded
-                 allLandmarks = new Array(5).fill(1);
-                 console.log("Mocking 5 landmarks for test.");
-            }
-            totalScore = Math.floor(Math.random() * (allLandmarks.length * 8)) + 10; // Random score
-            accuracyTracker = allLandmarks.map(() => Math.random() > 0.5 ? 1 : 0);
-            
-            endGame(); // This will set gameState = "GAME_OVER" and update UI
-        };
+            console.log("Skipping to results with a random score.");
 
+            if (allLandmarks.length === 0) {
+                allLandmarks = new Array(5).fill(1);
+            }
+
+            totalScore =
+                Math.floor(Math.random() * (allLandmarks.length * 8)) + 10;
+
+            accuracyTracker = allLandmarks.map(() =>
+                Math.random() > 0.5 ? 1 : 0
+            );
+
+            endGame();
+        };
     });
