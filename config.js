@@ -242,7 +242,7 @@ window.ARCGIGUESS_CONFIG = {
      * ---------------------------------------------------------------------- */
 
     leaderboard: {
-        enabled: false,
+        enabled: true,
 
         survey123Url:
             "https://survey123.arcgis.com/share/ca86560c30ff4566a52adfd45b829fd0?portalUrl=https://envirotech.maps.arcgis.com",
